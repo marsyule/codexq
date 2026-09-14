@@ -136,3 +136,44 @@
   2. **纯 Rust 核心引擎**：在 `src-tauri/src/core/` 中使用纯 Rust（`rusqlite` + `tokio` + `chrono` + `sha2` + `base64`）原生实现 SQLite WAL 存储、沙箱隔离、JWT 解析、原子无损切号、`codex app-server` 异步探测与 5 小时错峰闹钟调度。
   3. **彻底脱钩 Python**：Tauri Commands 直接调用内部 Rust Core，完全删除 `rpc.rs` 与 Python 守护进程。产物为 100% 独立绿色的单二进制程序，用户开箱即用，零环境依赖。
   4. **保留 `codexq.py`**：将 `codexq.py` 保留为非 GUI 服务器环境或纯脚本调用的独立工具，但不进入桌面端分发产物。
+
+---
+
+## 12. Windows 控制台黑窗口彻底清零 (Zero Console Flashing)
+
+- **决策时间**：v1.0.0 体验加固期
+- **背景与问题**：
+  在 Windows 下点击侧边栏「定时触发」或后台执行环境体检时，屏幕会瞬时闪现黑色的 CMD 命令控制台窗口，打断视觉连续性。
+- **根因剖析**：
+  1. Windows 操作系统默认行为：GUI 进程若通过 `std::process::Command` 调用命令且未注入 `CREATE_NO_WINDOW` 标志，内核会自动为其分配一个控制台。
+  2. 部分 CLI 工具（如 `codex.exe`）在未重定向 `stdin` 时会尝试检测或分配控制台以准备接收输入。
+- **决策与方案**：
+  1. 在 `doctor.rs`、`warmup.rs`、`process.rs` 中引入 `std::os::windows::process::CommandExt`，全局强制附加 `creation_flags(0x08000000)` (`CREATE_NO_WINDOW`)。
+  2. 全面绑定 `.stdin(Stdio::null())`，切断控制台依附需求，杜绝任何黑框闪烁。
+
+---
+
+## 13. Linux POSIX 权限沙箱与精准进程控制（防误杀自身）
+
+- **决策时间**：v1.0.0 Linux 适配期
+- **背景与问题**：
+  1. Linux 属于多用户系统，账号凭据必须受严格文件系统权限保护。
+  2. 早期重启逻辑使用 `pkill -f codex`，因 CodexQ 二进制自身包含 `codex` 且运行路径通常包含 `codex`，直接执行会导致 CodexQ 误杀自身。
+- **决策与方案**：
+  1. **权限沙箱**：利用 `std::os::unix::fs::PermissionsExt`，沙箱配置目录设为 `0o700` (`rwx------`)，凭据文件设为 `0o600` (`rw-------`)，普通配置设为 `0o644`。
+  2. **精准进程匹配**：重构为仅定向匹配 `codex.*app-server`、`codex-code-mode-host` 及官方桌面应用，显式排除自身二进制进程。
+  3. **终端矩阵自适应**：实现多终端拉起分发矩阵（GNOME `--`、Konsole `-e`、XFCE `-x`、Kitty、Alacritty 等）。
+
+---
+
+## 14. 语言切换通知状态响应式 Key 评估
+
+- **决策时间**：v1.0.0 国际化完善期
+- **背景与问题**：
+  用户从中文切换到英文时，顶部的“语言已经切换完成”横幅依然显示旧语言的中文，无法及时呈现新语言。
+- **根因剖析**：
+  React 函数组件闭包中的 `t` 函数在事件发生时刻仍绑定上个渲染周期的语言上下文；若直接调用 `showToast(t(...))`，解析出的静态字符串会被持久化进 State，即便随后整页重绘，横幅依旧渲染静态旧字符串。
+- **决策与方案**：
+  1. 扩展 `ToastPayload` 支持 `{ key: string; params?: Record<string, any> }` 结构。
+  2. `toastMessage` 状态存储 i18n 键值，在 JSX 渲染阶段进行惰性求值 `{toastMessage.key ? t(...) : toastMessage.text}`。
+  3. 切换语言时派发 `{ key: 'toasts.languageChanged' }`，实现即时与实时的自适应重绘。
