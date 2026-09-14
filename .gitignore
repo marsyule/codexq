@@ -1,0 +1,163 @@
+# ==============================================================================
+# CodexQ .gitignore (Rust Core + Tauri 2 + React/TypeScript + Python CLI)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Credentials, Secrets & Local Data (Zero-Leakage Policy)
+# ------------------------------------------------------------------------------
+# Local CLI configuration and profile stores
+.codex/
+.codexq/
+profiles/
+backups/
+local_test/
+
+# Sensitive credential and auth token files
+auth.json
+auth_backup.json
+auth*.json
+credentials.json
+*.pem
+*.key
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# ------------------------------------------------------------------------------
+# 2. Rust & Tauri Build Artifacts
+# ------------------------------------------------------------------------------
+target/
+src-tauri/target/
+src-tauri/gen/
+**/*.rs.bk
+*.pdb
+
+# ------------------------------------------------------------------------------
+# 3. Node.js, Frontend & Vite Build Artifacts
+# ------------------------------------------------------------------------------
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+.eslintcache
+*.tsbuildinfo
+
+# Package manager logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ------------------------------------------------------------------------------
+# 4. Python Compilation & Virtual Environments
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ------------------------------------------------------------------------------
+# 5. Testing, Coverage & Sandboxes
+# ------------------------------------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+test_sandbox*/
+test_data*/
+test_run*/
+
+# SQLite database files created during local testing
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+
+# ------------------------------------------------------------------------------
+# 6. Binary Executables & Installers (Release Bundles)
+# ------------------------------------------------------------------------------
+*.exe
+*.dll
+*.dylib
+*.msi
+*.AppImage
+*.deb
+*.dmg
+*.zip
+*.tar.gz
+
+# ------------------------------------------------------------------------------
+# 7. Operating System & Editor Files
+# ------------------------------------------------------------------------------
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# IDEs & Editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+.fleet/
+
+# ------------------------------------------------------------------------------
+# 8. Logs & Temporary Files
+# ------------------------------------------------------------------------------
+*.log
+logs/
+*.pid
+*.seed
+*.tmp

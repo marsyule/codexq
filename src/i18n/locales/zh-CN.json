@@ -1,0 +1,275 @@
+{
+  "app": {
+    "title": "CodexQ",
+    "subtitle": "多账号额度与原子切号管理器",
+    "status": {
+      "running": "Codex 运行中",
+      "stopped": "Codex 未运行",
+      "refreshing": "刷新中...",
+      "restarting": "重启中..."
+    },
+    "actions": {
+      "restartCodex": "重启 Codex",
+      "refreshQuotas": "刷新配额"
+    },
+    "header": {
+      "accountsDesc": "多账号配额用量实时监控与一键会话切换",
+      "schedulerDesc": "多账号独立闹钟排期与错峰触发",
+      "settingsDesc": "配置选项、沙盒状态与应用偏好设置"
+    }
+  },
+  "nav": {
+    "accounts": "账号管理",
+    "scheduler": "定时触发",
+    "trash": "回收站",
+    "settings": "设置与关于"
+  },
+  "accounts": {
+    "addBtn": "添加账号",
+    "connectedPool": "连接账号池",
+    "synced": "最近同步",
+    "activeSession": "当前活跃会话",
+    "availablePool": "可用账号池",
+    "filterCriteria": "筛选条件",
+    "searchPlaceholder": "搜索账号 (邮箱/别名/Plan)...",
+    "noActiveTitle": "未检测到当前激活的 Codex 登录账号",
+    "noActiveDesc": "您可以从下方已保存的账号池中选择一个一键切换激活，或者在终端运行 codex login 进行登录。",
+    "noOtherAccounts": "暂无其他备用账号",
+    "noOtherAccountsDesc": "如需添加更多账号，只需在终端切换登录其他 Codex 账号，CodexQ 将在操作时自动捕获并无缝归档到账号池中。",
+    "noSearchResults": "未找到符合搜索条件的账号。",
+    "emptyTitle": "暂无已登录账号",
+    "emptyDesc": "请先使用官方 OpenAI Codex CLI 登录至少一个账号。",
+    "activeBadge": "当前活跃",
+    "switchTo": "切换至此账号",
+    "editAlias": "修改别名",
+    "moveToTrash": "移至回收站",
+    "remaining": "剩余",
+    "resetsAt": "重置于",
+    "used": "已用",
+    "primaryWindow": "5H主窗口",
+    "secondaryWindow": "周度窗口",
+    "availableResets": "可用重置",
+    "unnamed": "未命名账号",
+    "viewHistory": "历史记录",
+    "totalCount": "共 {{count}} 个账号"
+  },
+  "scheduler": {
+    "accountSelectorLabel": "当前配置账号:",
+    "testTrigger": "测试触发",
+    "testingTrigger": "触发中...",
+    "addAlarm": "添加排期",
+    "table": {
+      "time": "触发时间",
+      "days": "重复周期",
+      "status": "状态",
+      "lastRun": "上次触发",
+      "actions": "操作",
+      "enabled": "已启用",
+      "disabled": "已禁用",
+      "never": "暂未触发",
+      "success": "成功",
+      "skipped": "已跳过",
+      "failed": "失败"
+    },
+    "days": {
+      "once": "仅一次",
+      "all": "每天",
+      "workdays": "工作日",
+      "weekends": "周末",
+      "d1": "周一",
+      "d2": "周二",
+      "d3": "周三",
+      "d4": "周四",
+      "d5": "周五",
+      "d6": "周六",
+      "d7": "周日"
+    },
+    "emptyTitle": "暂无排期闹钟",
+    "emptyDesc": "点击上方按钮为当前账号添加定时触发排期。",
+    "intervalError": "任意两个闹钟间隔必须至少 5 小时，防止窗口重复重叠。"
+  },
+  "trash": {
+    "title": "回收站 (已软删除账号)",
+    "desc": "被删除的账号会安全暂存在此处，可随时恢复或物理粉碎。",
+    "restore": "恢复账号",
+    "restoring": "正在恢复...",
+    "purge": "物理粉碎",
+    "emptyButton": "清空回收站",
+    "emptyTitle": "回收站为空",
+    "emptyDesc": "当前没有任何软删除的账号。",
+    "deletedAt": "删除于",
+    "reauthRequired": "凭证需重登"
+  },
+  "settings": {
+    "general": {
+      "title": "通用与界面偏好",
+      "language": "界面语言",
+      "languageDesc": "选择应用程序的显示语言",
+      "auto": "跟随系统 (Auto)",
+      "zhCN": "简体中文 (Simplified Chinese)",
+      "enUS": "English"
+    },
+    "refresh": {
+      "title": "自动刷新与定时任务",
+      "statusPaused": "已暂停",
+      "statusEvery": "每 {{mins}} 分钟",
+      "enableLabel": "后台周期自动轮询",
+      "enableDesc": "按设定时间间隔自动在后台向官方 app-server 发起额度探测",
+      "intervalLabel": "刷新间隔",
+      "intervalCustom": "自定义 (分钟)",
+      "startupLabel": "冷启动立即刷新",
+      "startupDesc": "应用启动时立即在后台触发一次额度同步",
+      "dynamicResetLabel": "JIT 到期动态自感知唤醒",
+      "dynamicResetTag": "JIT 智能感知",
+      "dynamicResetDesc": "账号额度重置时刻 (+10s 缓冲) 自动唤醒精准刷新",
+      "notifyRestoredLabel": "满血复活原生桌面通知",
+      "notifyRestoredDesc": "账号额度完全恢复满血时弹出系统通知",
+      "notifyUpdateLabel": "周期刷新静默通知",
+      "notifyUpdateDesc": "每次周期轮询完成时弹出轻微 Toast 提示",
+      "minutes": "分钟",
+      "minUnit": "分"
+    },
+    "trigger": {
+      "title": "全局定时触发设置",
+      "defaultModel": "默认触发模型",
+      "defaultModelDesc": "自动化排期闹钟或测试触发时默认调用的模型",
+      "presetModels": "常用推荐模型",
+      "presetModelsDesc": "点击快速应用，或点击 × 删除已有预设",
+      "addPresetPlaceholder": "输入模型名称并按 Enter 添加...",
+      "prompt": "触发提示词 (Prompt)",
+      "promptDesc": "发送给模型的轻量问候内容，用于激活额度滑动窗口",
+      "skipIfActive": "智能防浪费跳过",
+      "skipIfActiveDesc": "若当前 5 小时额度窗口已处于活跃状态，定时排期自动跳过以节省额度"
+    },
+    "dataProcess": {
+      "title": "数据与进程管理",
+      "restartCodex": "重启 Codex 进程",
+      "restartCodexDesc": "终止并重新拉起运行中的 Codex 桌面应用及后台服务以加载最新登录",
+      "resetAliases": "重置所有别名",
+      "resetAliasesDesc": "将所有账号的别名还原为登录邮箱默认名称",
+      "storageDir": "本地存储目录",
+      "storageDirDesc": "SQLite3 + 沙盒凭据"
+    },
+    "about": {
+      "title": "关于 CodexQ",
+      "desc": "CodexQ 是一个高效、轻量级的本地多账号 Codex 配额追踪与快速会话切换器。基于 Tauri 跨平台原生架构与 Rust 高性能内核构建。",
+      "version": "版本",
+      "architecture": "核心架构",
+      "architectureValue": "Tauri 2 (Rust 原生内核) + React 19 (零外部运行时依赖)",
+      "storage": "数据存储目录",
+      "configFile": "全局配置文件",
+      "license": "开源协议",
+      "licenseValue": "MIT License - 免费开源"
+    }
+  },
+  "modals": {
+    "alias": {
+      "title": "修改账号别名",
+      "desc": "为该账号设置易于辨识的自定义别名，方便在多账号间清晰切换。",
+      "placeholder": "请输入自定义别名...",
+      "hint": "留空并保存将清空当前自定义别名。",
+      "save": "保存",
+      "cancel": "取消"
+    },
+    "history": {
+      "title": "额度历史快照",
+      "time": "观测时间",
+      "remaining": "可用额度",
+      "resetsAt": "主周期重置",
+      "empty": "暂无快照数据记录。",
+      "close": "关闭"
+    },
+    "remove": {
+      "title": "确认移入回收站？",
+      "desc": "账号 {{email}} 将被停用并安全归档至回收站，随时可以恢复。",
+      "confirm": "确认移入",
+      "cancel": "取消"
+    },
+    "resetAliases": {
+      "title": "确认重置所有别名？",
+      "desc": "此操作将清除所有账号的自定义别名，恢复为原始邮箱或用户标识。",
+      "confirm": "确认重置",
+      "cancel": "取消"
+    },
+    "purge": {
+      "title": "确认物理彻底粉碎？",
+      "desc": "此操作将永久抹除账号 {{email}} 的 Profile 沙箱与凭据，完全不可逆。",
+      "confirm": "彻底粉碎",
+      "cancel": "取消"
+    },
+    "emptyTrash": {
+      "title": "确认清空回收站？",
+      "desc": "回收站中的所有归档账号将被永久彻底销毁，不可恢复。",
+      "confirm": "全部清空",
+      "cancel": "取消"
+    }
+  },
+  "toasts": {
+    "switchSuccess": "已成功切换至账号: {{name}}",
+    "switchFailed": "切换账号失败: {{error}}",
+    "aliasUpdated": "账号别名修改成功",
+    "aliasReset": "所有账号别名已重置",
+    "accountRemoved": "账号已安全移入回收站",
+    "accountRestored": "账号 {{name}} 已成功从回收站恢复",
+    "trashPurged": "账号 {{name}} 已彻底粉碎清除",
+    "trashEmptied": "回收站已完全清空",
+    "alarmSaved": "排期闹钟已保存",
+    "alarmDeleted": "排期闹钟已删除",
+    "testTriggerSuccess": "测试触发成功！当前额度窗口已激活。",
+    "testTriggerSkipped": "测试触发已跳过：当前额度窗口已处于活跃状态。",
+    "testTriggerFailed": "测试触发失败: {{error}}",
+    "settingsSaved": "设置已保存",
+    "refreshSuccess": "配额刷新成功",
+    "refreshPartialWithReauth": "部分账号刷新失败：登录凭据已过期需重新登录",
+    "refreshFailed": "配额刷新失败: {{error}}",
+    "languageChanged": "界面语言切换成功",
+    "codexRestarted": "Codex 桌面应用已成功重启。",
+    "codexStarted": "Codex 桌面应用已启动。",
+    "startupSync": "已完成启动同步：获取最新配额",
+    "jitSync": "已检测到配额到达重置时间，完成精准满血同步",
+    "autoRefreshEnabled": "已开启自动刷新（每 {{mins}} 分钟）",
+    "autoRefreshPaused": "已暂停自动刷新",
+    "dynamicResetEnabled": "已开启到期动态精准刷新",
+    "dynamicResetDisabled": "已关闭到期动态精准刷新"
+  },
+  "addAccount": {
+    "btn": "添加账号",
+    "title": "添加账号到账号池",
+    "subtitle": "通过官方终端登录或直接导入本地凭据",
+    "tabTerminal": "官方终端登录",
+    "tabFile": "导入凭据文件",
+    "step1": "点击下方按钮调起系统终端，自动执行 codex login 命令；",
+    "step2": "系统将弹出默认浏览器并跳转到 OpenAI 官方登录授权页面；",
+    "step3": "在浏览器中完成登录后，返回 CodexQ 点击「已完成登录，立即同步」。",
+    "launchBtn": "调起登录终端",
+    "syncBtnDefault": "立即同步账号",
+    "syncBtnLaunched": "已完成登录，立即同步",
+    "terminalLaunchedToast": "已调起登录终端，请在浏览器中完成授权",
+    "syncSuccessToast": "账号池同步完成！",
+    "fileSelectPrompt": "点击或拖拽 auth.json 文件到此处",
+    "fileFormatsHint": "支持标准 OpenAI Codex auth.json 文件",
+    "fileSelectedHint": "已读取凭据，点击下方按钮完成导入",
+    "manualPathLabel": "或手动输入 auth.json 绝对文件路径：",
+    "importBtn": "立即导入凭据",
+    "noFileSelected": "请选择文件或输入有效的文件路径",
+    "fileReadError": "读取选定文件失败，请重试",
+    "importSuccessNew": "成功录入新账号 {{email}}！",
+    "importSuccessUpdated": "已成功更新账号 {{email}} 的凭据！"
+  },
+  "doctor": {
+    "title": "环境与健康诊断 (CodexQ Doctor)",
+    "subtitle": "实时检测 CLI、凭据沙箱、SQLite 存储与认证网络连接",
+    "recheck": "重新诊断",
+    "checking": "诊断中...",
+    "statusOk": "正常",
+    "statusWarning": "注意",
+    "statusError": "异常",
+    "lastChecked": "诊断时间"
+  },
+  "tray": {
+    "show": "显示 / 隐藏主窗口",
+    "refresh": "刷新全部配额",
+    "restart": "重启 Codex 客户端",
+    "quit": "退出 CodexQ"
+  }
+}

@@ -1,0 +1,275 @@
+{
+  "app": {
+    "title": "CodexQ",
+    "subtitle": "Multi-Account Quota & Atomic Switcher",
+    "status": {
+      "running": "Codex Running",
+      "stopped": "Codex Stopped",
+      "refreshing": "Refreshing...",
+      "restarting": "Restarting..."
+    },
+    "actions": {
+      "restartCodex": "Restart Codex",
+      "refreshQuotas": "Refresh Quotas"
+    },
+    "header": {
+      "accountsDesc": "Real-time multi-account quota monitoring and atomic session switching",
+      "schedulerDesc": "Independent multi-account alarms and staggered window activation",
+      "settingsDesc": "Configuration options, sandbox status, and application preferences"
+    }
+  },
+  "nav": {
+    "accounts": "Accounts",
+    "scheduler": "Trigger Scheduler",
+    "trash": "Trash",
+    "settings": "Settings & About"
+  },
+  "accounts": {
+    "addBtn": "Add Account",
+    "connectedPool": "Connected Pool",
+    "synced": "Synced",
+    "activeSession": "Active Session",
+    "availablePool": "Available Pool",
+    "filterCriteria": "Filter criteria",
+    "searchPlaceholder": "Search accounts (email, alias, plan)...",
+    "noActiveTitle": "No Active Codex Login Detected",
+    "noActiveDesc": "You can switch to an account from the pool below, or run codex login in terminal.",
+    "noOtherAccounts": "No Other Spare Accounts",
+    "noOtherAccountsDesc": "To add more accounts, log in to another account via Codex CLI. CodexQ will automatically capture and archive it.",
+    "noSearchResults": "No accounts matching search criteria.",
+    "emptyTitle": "No Accounts Found",
+    "emptyDesc": "Please log in to at least one account using the official OpenAI Codex CLI.",
+    "activeBadge": "ACTIVE",
+    "switchTo": "Switch to Account",
+    "editAlias": "Edit Alias",
+    "moveToTrash": "Move to Trash",
+    "remaining": "Remaining",
+    "resetsAt": "Resets at",
+    "used": "Used",
+    "primaryWindow": "5h Primary Window",
+    "secondaryWindow": "Weekly Window",
+    "availableResets": "Available Resets",
+    "unnamed": "Unnamed Account",
+    "viewHistory": "History",
+    "totalCount": "{{count}} accounts in total"
+  },
+  "scheduler": {
+    "accountSelectorLabel": "Configured Account:",
+    "testTrigger": "Test Trigger",
+    "testingTrigger": "Triggering...",
+    "addAlarm": "Add Alarm",
+    "table": {
+      "time": "Trigger Time",
+      "days": "Repeat",
+      "status": "Status",
+      "lastRun": "Last Triggered",
+      "actions": "Actions",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "never": "Never",
+      "success": "Success",
+      "skipped": "Skipped",
+      "failed": "Failed"
+    },
+    "days": {
+      "once": "Once",
+      "all": "Everyday",
+      "workdays": "Workdays",
+      "weekends": "Weekends",
+      "d1": "Mon",
+      "d2": "Tue",
+      "d3": "Wed",
+      "d4": "Thu",
+      "d5": "Fri",
+      "d6": "Sat",
+      "d7": "Sun"
+    },
+    "emptyTitle": "No Scheduled Alarms",
+    "emptyDesc": "Click the button above to add a trigger schedule for the selected account.",
+    "intervalError": "Alarms must be scheduled at least 5 hours apart to avoid window overlap."
+  },
+  "trash": {
+    "title": "Trash (Soft-deleted Accounts)",
+    "desc": "Deleted accounts are safely archived here and can be restored or purged at any time.",
+    "restore": "Restore",
+    "restoring": "Restoring...",
+    "purge": "Purge",
+    "emptyButton": "Empty Trash",
+    "emptyTitle": "Trash is Empty",
+    "emptyDesc": "No deleted accounts in the trash.",
+    "deletedAt": "Deleted at",
+    "reauthRequired": "Reauth Required"
+  },
+  "settings": {
+    "general": {
+      "title": "General & Preferences",
+      "language": "Language",
+      "languageDesc": "Select application display language",
+      "auto": "Follow System (Auto)",
+      "zhCN": "简体中文 (Simplified Chinese)",
+      "enUS": "English"
+    },
+    "refresh": {
+      "title": "Auto-Refresh & Background Polling",
+      "statusPaused": "Paused",
+      "statusEvery": "Every {{mins}} mins",
+      "enableLabel": "Enable Periodic Polling",
+      "enableDesc": "Periodically probe the official app-server for quota updates in the background",
+      "intervalLabel": "Refresh Interval",
+      "intervalCustom": "Custom (minutes)",
+      "startupLabel": "Refresh on Startup",
+      "startupDesc": "Automatically synchronize quotas in the background when the app launches",
+      "dynamicResetLabel": "JIT Dynamic Reset Wakeup",
+      "dynamicResetTag": "JIT Smart Wakeup",
+      "dynamicResetDesc": "Automatically wake up to refresh at the exact quota reset moment (+10s buffer)",
+      "notifyRestoredLabel": "Quota Restored Notification",
+      "notifyRestoredDesc": "Show native desktop notification when an account quota is fully restored",
+      "notifyUpdateLabel": "Periodic Refresh Notice",
+      "notifyUpdateDesc": "Show a subtle toast notification each time periodic refresh completes",
+      "minutes": "mins",
+      "minUnit": "m"
+    },
+    "trigger": {
+      "title": "Global Trigger Settings",
+      "defaultModel": "Default Trigger Model",
+      "defaultModelDesc": "Default model invoked for automated scheduled alarms or test triggers",
+      "presetModels": "Preset Models",
+      "presetModelsDesc": "Click to quickly select, or click × to remove",
+      "addPresetPlaceholder": "Type model name and press Enter to add...",
+      "prompt": "Trigger Prompt",
+      "promptDesc": "Lightweight greeting message sent to activate the quota window",
+      "skipIfActive": "Smart Skip-if-Active",
+      "skipIfActiveDesc": "Automatically skip scheduled alarms if the current 5-hour quota window is already active"
+    },
+    "dataProcess": {
+      "title": "Data & Process Management",
+      "restartCodex": "Restart Codex Process",
+      "restartCodexDesc": "Terminate and restart running Codex desktop application and background services",
+      "resetAliases": "Reset All Aliases",
+      "resetAliasesDesc": "Restore all account aliases to their default login emails",
+      "storageDir": "Local Storage Directory",
+      "storageDirDesc": "SQLite3 + Sandbox Credentials"
+    },
+    "about": {
+      "title": "About CodexQ",
+      "desc": "CodexQ is a high-performance, lightweight local multi-account Codex quota tracker and rapid session switcher built on Tauri cross-platform native architecture and pure Rust core.",
+      "version": "Version",
+      "architecture": "Architecture",
+      "architectureValue": "Tauri 2 (Pure Rust Core) + React 19 (Zero Dependencies)",
+      "storage": "Storage Directory",
+      "configFile": "Configuration File",
+      "license": "License",
+      "licenseValue": "MIT License - Open Source"
+    }
+  },
+  "modals": {
+    "alias": {
+      "title": "Edit Account Alias",
+      "desc": "Set a friendly alias for this account to easily distinguish between multiple profiles.",
+      "placeholder": "Enter custom alias...",
+      "hint": "Leave blank and save to clear the custom alias.",
+      "save": "Save",
+      "cancel": "Cancel"
+    },
+    "history": {
+      "title": "Quota History Snapshots",
+      "time": "Observed At",
+      "remaining": "Remaining",
+      "resetsAt": "Reset Time",
+      "empty": "No snapshots recorded yet.",
+      "close": "Close"
+    },
+    "remove": {
+      "title": "Move to Trash?",
+      "desc": "Account {{email}} will be deactivated and archived in Trash. You can restore it anytime.",
+      "confirm": "Move to Trash",
+      "cancel": "Cancel"
+    },
+    "resetAliases": {
+      "title": "Reset All Custom Aliases?",
+      "desc": "This will clear custom aliases for all accounts and restore their default email or identifiers.",
+      "confirm": "Reset All",
+      "cancel": "Cancel"
+    },
+    "purge": {
+      "title": "Permanently Purge Account?",
+      "desc": "This will permanently delete profile {{email}} and all its credentials. This action cannot be undone.",
+      "confirm": "Purge Permanently",
+      "cancel": "Cancel"
+    },
+    "emptyTrash": {
+      "title": "Empty Trash?",
+      "desc": "All archived accounts will be permanently destroyed. This cannot be undone.",
+      "confirm": "Empty All",
+      "cancel": "Cancel"
+    }
+  },
+  "toasts": {
+    "switchSuccess": "Switched to account: {{name}}",
+    "switchFailed": "Failed to switch account: {{error}}",
+    "aliasUpdated": "Alias updated successfully",
+    "aliasReset": "All custom aliases have been reset",
+    "accountRemoved": "Account moved to trash",
+    "accountRestored": "Account {{name}} restored successfully",
+    "trashPurged": "Account {{name}} permanently purged",
+    "trashEmptied": "Trash has been emptied",
+    "alarmSaved": "Trigger alarm saved",
+    "alarmDeleted": "Trigger alarm deleted",
+    "testTriggerSuccess": "Test trigger completed! Quota window is now active.",
+    "testTriggerSkipped": "Test trigger skipped: quota window is already active.",
+    "testTriggerFailed": "Test trigger failed: {{error}}",
+    "settingsSaved": "Settings saved",
+    "refreshSuccess": "Quotas refreshed successfully",
+    "refreshPartialWithReauth": "Quota refresh completed: some accounts require re-login",
+    "refreshFailed": "Failed to refresh quotas: {{error}}",
+    "languageChanged": "Language changed successfully",
+    "codexRestarted": "Codex desktop app restarted successfully.",
+    "codexStarted": "Codex desktop app launched.",
+    "startupSync": "Startup synchronization completed: latest quotas retrieved",
+    "jitSync": "Quota reset time reached, completed precise full synchronization",
+    "autoRefreshEnabled": "Auto-refresh enabled (every {{mins}} mins)",
+    "autoRefreshPaused": "Auto-refresh paused",
+    "dynamicResetEnabled": "JIT dynamic reset refresh enabled",
+    "dynamicResetDisabled": "JIT dynamic reset refresh disabled"
+  },
+  "addAccount": {
+    "btn": "Add Account",
+    "title": "Add Account to Pool",
+    "subtitle": "Onboard accounts via official terminal login or credential import",
+    "tabTerminal": "Terminal Login",
+    "tabFile": "Import Credential",
+    "step1": "Click below to spawn system terminal running 'codex login';",
+    "step2": "Your default browser will open OpenAI OAuth authorization page;",
+    "step3": "Complete login in browser, then return and click 'Sync Now'.",
+    "launchBtn": "Launch Login Terminal",
+    "syncBtnDefault": "Sync Account Pool",
+    "syncBtnLaunched": "Completed Login, Sync Now",
+    "terminalLaunchedToast": "Login terminal spawned. Please complete OAuth in your browser.",
+    "syncSuccessToast": "Account pool synchronized successfully!",
+    "fileSelectPrompt": "Click or drag auth.json file here",
+    "fileFormatsHint": "Supports standard OpenAI Codex auth.json file",
+    "fileSelectedHint": "Credentials loaded. Click below to complete import.",
+    "manualPathLabel": "Or enter absolute path to auth.json:",
+    "importBtn": "Import Credentials",
+    "noFileSelected": "Please select a file or enter a valid file path",
+    "fileReadError": "Failed to read the selected file",
+    "importSuccessNew": "Successfully imported new account {{email}}!",
+    "importSuccessUpdated": "Successfully updated credentials for {{email}}!"
+  },
+  "doctor": {
+    "title": "System Diagnostics (CodexQ Doctor)",
+    "subtitle": "Real-time health check for CLI, sandboxing, SQLite storage, and auth network",
+    "recheck": "Run Diagnostics",
+    "checking": "Diagnosing...",
+    "statusOk": "Healthy",
+    "statusWarning": "Notice",
+    "statusError": "Issue",
+    "lastChecked": "Last checked"
+  },
+  "tray": {
+    "show": "Show / Hide Dashboard",
+    "refresh": "Refresh All Quotas",
+    "restart": "Restart Codex App",
+    "quit": "Quit CodexQ"
+  }
+}
