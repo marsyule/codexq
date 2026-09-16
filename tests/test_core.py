@@ -225,7 +225,8 @@ class TestCodexQController(unittest.TestCase):
 
     def test_restart_codex_not_running_start_if_not_running(self):
         from unittest.mock import patch, MagicMock
-        with patch("codexq.subprocess.run") as mock_run, \
+        with patch("codexq.sys.platform", "win32"), \
+             patch("codexq.subprocess.run") as mock_run, \
              patch("codexq.os.startfile", create=True) as mock_startfile:
             # Simulate powershell returns empty (no processes found)
             mock_res = MagicMock()
@@ -240,7 +241,8 @@ class TestCodexQController(unittest.TestCase):
 
     def test_restart_codex_not_running_no_start(self):
         from unittest.mock import patch, MagicMock
-        with patch("codexq.subprocess.run") as mock_run, \
+        with patch("codexq.sys.platform", "win32"), \
+             patch("codexq.subprocess.run") as mock_run, \
              patch("codexq.os.startfile", create=True) as mock_startfile:
             mock_res = MagicMock()
             mock_res.stdout = ""
@@ -251,6 +253,21 @@ class TestCodexQController(unittest.TestCase):
             self.assertTrue(ok)
             self.assertIn("后台服务", msg)
             mock_startfile.assert_not_called()
+
+    def test_restart_codex_linux(self):
+        from unittest.mock import patch, MagicMock
+        with patch("codexq.sys.platform", "linux"), \
+             patch("codexq.subprocess.run") as mock_run, \
+             patch("codexq.subprocess.Popen") as mock_popen:
+            mock_res = MagicMock()
+            mock_res.returncode = 1
+            mock_res.stdout = ""
+            mock_run.return_value = mock_res
+
+            ok, msg = codexq.restart_codex_system(relaunch=True, start_if_not_running=True)
+            self.assertTrue(ok)
+            self.assertIn("已启动", msg)
+            mock_popen.assert_called_once()
 
     def test_auto_sync_backups_absorbing_newer_credentials(self):
         # 1. Start with initial active login
