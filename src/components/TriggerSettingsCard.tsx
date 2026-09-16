@@ -201,7 +201,7 @@ export const TriggerSettingsCard: React.FC<TriggerSettingsCardProps> = ({ showTo
       </div>
 
       {/* Skip if active */}
-      <div className="flex items-center justify-between py-2">
+      <div className="flex items-center justify-between py-2 border-b border-slate-100">
         <div>
           <h4 className="text-sm font-semibold text-slate-800">{t('settings.trigger.skipIfActive')}</h4>
           <p className="text-xs text-slate-500">{t('settings.trigger.skipIfActiveDesc')}</p>

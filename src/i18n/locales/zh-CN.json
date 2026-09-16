@@ -86,7 +86,20 @@
     },
     "emptyTitle": "暂无排期闹钟",
     "emptyDesc": "点击上方按钮为当前账号添加定时触发排期。",
-    "intervalError": "任意两个闹钟间隔必须至少 5 小时，防止窗口重复重叠。"
+    "intervalError": "任意两个闹钟间隔必须至少 5 小时，防止窗口重复重叠。",
+    "autoRolloverActive": "自动续窗监听中",
+    "autoRolloverInactive": "自动续窗未开启",
+    "autoRolloverCardTitle": "5小时恢复自动续窗",
+    "autoRolloverCardTag": "自动垫刀",
+    "autoRolloverCardDesc": "当该账号 5 小时额度恢复可用且当周尚有剩余额度时，自动触发轻量探针唤醒新一轮 5 小时滑动窗口。",
+    "autoRolloverEnable": "启用此账号自动续窗",
+    "autoRolloverMinWeeklyRemaining": "周最低剩余额度",
+    "autoRolloverMinWeeklyRemainingDesc": "周剩余额度低于此比例时停止自动续窗（设为 0 表示只要有额度即续窗，耗尽停止；设为 10 表示保留 10% 额度保底）。",
+    "autoRolloverCurrentRemaining": "当前周剩余额度",
+    "autoRolloverStatusOk": "额度充足，就绪中",
+    "autoRolloverStatusExhausted": "周额度已耗尽 (自动暂停)",
+    "autoRolloverStatusBelowMin": "已低于保底门限 (自动拦截)",
+    "autoRolloverStatusUnlimited": "无周配额限制"
   },
   "trash": {
     "title": "回收站 (已软删除账号)",
@@ -230,7 +243,10 @@
     "autoRefreshEnabled": "已开启自动刷新（每 {{mins}} 分钟）",
     "autoRefreshPaused": "已暂停自动刷新",
     "dynamicResetEnabled": "已开启到期动态精准刷新",
-    "dynamicResetDisabled": "已关闭到期动态精准刷新"
+    "dynamicResetDisabled": "已关闭到期动态精准刷新",
+    "autoRolloverEnabled": "已开启该账号 5 小时自动续窗",
+    "autoRolloverDisabled": "已关闭该账号 5 小时自动续窗",
+    "autoRolloverSaved": "自动续窗配置已保存"
   },
   "addAccount": {
     "btn": "添加账号",

@@ -7,6 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "tauri": "tauri",
+    "build:portable": "node scripts/build-portable.mjs",
+    "build:release": "tauri build && node scripts/package-release.mjs",
+    "package": "node scripts/package-release.mjs",
     "lint": "oxlint",
     "preview": "vite preview"
   },

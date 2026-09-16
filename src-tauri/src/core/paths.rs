@@ -2,12 +2,21 @@
 
 use std::path::PathBuf;
 
-/// Returns the base directory for CodexQ data (`~/.codexq` or `$CODEXQ_HOME`).
+/// Returns the base directory for CodexQ data (`~/.codexq`, `$CODEXQ_HOME`, or `./data` in portable mode).
 #[must_use]
 pub fn codexq_home() -> PathBuf {
     if let Ok(val) = std::env::var("CODEXQ_HOME") {
         if !val.trim().is_empty() {
             return PathBuf::from(val.trim());
+        }
+    }
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let portable_marker = exe_dir.join("portable");
+            let data_dir = exe_dir.join("data");
+            if portable_marker.exists() || data_dir.is_dir() {
+                return data_dir;
+            }
         }
     }
     dirs::home_dir()

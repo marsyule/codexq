@@ -33,6 +33,8 @@ pub fn run() {
             commands::import_auth_file,
             commands::launch_codex_login,
             commands::run_diagnostics,
+            commands::get_account_rollover,
+            commands::save_account_rollover,
         ])
         .setup(|app| {
             // Ensure host ~/.codex/config.toml enforces cli_auth_credentials_store = "file"
@@ -41,7 +43,7 @@ pub fn run() {
             let menu = create_tray_menu(app.handle(), "en-US")?;
 
             // Start background alarm scheduler ticker
-            crate::core::scheduler::start_alarm_scheduler();
+            crate::core::scheduler::start_alarm_scheduler(Some(app.handle().clone()));
 
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)

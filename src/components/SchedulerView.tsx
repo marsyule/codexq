@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
-import type { AccountData, AccountAlarm, ToastPayload } from '../types';
+import type { AccountData, AccountAlarm, AccountRolloverConfig, ToastPayload } from '../types';
 import {
   Plus,
   Trash2,
@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   AlertCircle,
   Play,
+  Sparkles,
 } from 'lucide-react';
 
 interface SchedulerViewProps {
@@ -52,17 +53,19 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
   showToast,
 }) => {
   const { t } = useTranslation();
-  // Selected account for alarms view
+  // Selected account for alarms view (defaults to current active account on application launch)
   const [selectedKey, setSelectedKey] = useState<string>(() => {
     const active = accounts.find((a) => a.is_current);
     return active ? active.identity_key : accounts[0]?.identity_key || '';
   });
 
-  // Keep selectedKey in sync if accounts load after initial mount
+  // Keep selectedKey in sync if accounts load after initial mount or selected account is removed
   useEffect(() => {
-    if (!selectedKey && accounts.length > 0) {
-      const active = accounts.find((a) => a.is_current);
-      setSelectedKey(active ? active.identity_key : accounts[0].identity_key);
+    if (accounts.length > 0) {
+      if (!selectedKey || !accounts.some((a) => a.identity_key === selectedKey)) {
+        const active = accounts.find((a) => a.is_current);
+        setSelectedKey(active ? active.identity_key : accounts[0].identity_key);
+      }
     }
   }, [accounts, selectedKey]);
 
@@ -70,6 +73,11 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
   const [alarms, setAlarms] = useState<AccountAlarm[]>([]);
   const [loadingAlarms, setLoadingAlarms] = useState<boolean>(false);
   const [defaultModel, setDefaultModel] = useState<string>('gpt-5.6-luna');
+
+  // Account Rollover state
+  const [rolloverEnabled, setRolloverEnabled] = useState<boolean>(false);
+  const [minWeeklyRemaining, setMinWeeklyRemaining] = useState<number>(0);
+  const [savingRollover, setSavingRollover] = useState<boolean>(false);
 
   // Add alarm form state
   const [showAddAlarm, setShowAddAlarm] = useState<boolean>(false);
@@ -81,7 +89,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
   // Test trigger action state
   const [testingTrigger, setTestingTrigger] = useState<boolean>(false);
 
-  // Load default model from settings for display
+  // Load default model for display
   useEffect(() => {
     invoke<Record<string, string>>('get_app_settings')
       .then((res) => {
@@ -89,8 +97,65 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
           setDefaultModel(res['warmup.default_model']);
         }
       })
-      .catch((err) => console.warn('Failed to load default model', err));
+      .catch((err) => console.warn('Failed to load settings', err));
   }, []);
+
+  // Fetch account rollover config on selected account change
+  const fetchRolloverConfig = useCallback(async () => {
+    if (!selectedKey) return;
+    try {
+      const cfg = await invoke<AccountRolloverConfig>('get_account_rollover', { identityKey: selectedKey });
+      if (cfg) {
+        setRolloverEnabled(cfg.enabled);
+        setMinWeeklyRemaining(cfg.min_weekly_remaining);
+      }
+    } catch (err) {
+      console.warn('Failed to load account rollover config', err);
+    }
+  }, [selectedKey]);
+
+  useEffect(() => {
+    fetchRolloverConfig();
+  }, [fetchRolloverConfig]);
+
+  const handleToggleRollover = async (enabled: boolean) => {
+    if (!selectedKey) return;
+    setSavingRollover(true);
+    try {
+      await invoke('save_account_rollover', {
+        identityKey: selectedKey,
+        enabled,
+        minWeeklyRemaining,
+      });
+      setRolloverEnabled(enabled);
+      showToast(enabled ? { key: 'toasts.autoRolloverEnabled' } : { key: 'toasts.autoRolloverDisabled' });
+    } catch (err) {
+      console.error('Failed to update account rollover', err);
+      showToast(`保存失败: ${err}`, 'error');
+    } finally {
+      setSavingRollover(false);
+    }
+  };
+
+  const handleUpdateMinRemaining = async (val: number) => {
+    if (!selectedKey) return;
+    const clamped = Math.min(100, Math.max(0, val));
+    setMinWeeklyRemaining(clamped);
+    setSavingRollover(true);
+    try {
+      await invoke('save_account_rollover', {
+        identityKey: selectedKey,
+        enabled: rolloverEnabled,
+        minWeeklyRemaining: clamped,
+      });
+      showToast({ key: 'toasts.autoRolloverSaved' }, 'success');
+    } catch (err) {
+      console.error('Failed to update account rollover threshold', err);
+      showToast(`保存失败: ${err}`, 'error');
+    } finally {
+      setSavingRollover(false);
+    }
+  };
 
   // Load alarms from backend
   const fetchAlarms = useCallback(async () => {
@@ -114,6 +179,14 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
   const selectedAccount = useMemo(() => {
     return accounts.find((a) => a.identity_key === selectedKey);
   }, [accounts, selectedKey]);
+
+  // Weekly quota remaining percent (0.0 - 100.0)
+  const secondaryRemaining = useMemo(() => {
+    if (selectedAccount?.secondary?.used_percent != null) {
+      return Math.max(0, Math.min(100, 100 - selectedAccount.secondary.used_percent));
+    }
+    return null;
+  }, [selectedAccount]);
 
   // Convert time "HH:MM" to minutes
   const timeToMinutes = (t: string): number => {
@@ -314,6 +387,105 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
           </div>
         </div>
 
+        {/* 5-Hour Restore Auto-Rollover Section */}
+        <div className="rounded-xl border border-slate-200/80 bg-slate-50/50 p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-xl bg-emerald-50 text-emerald-600">
+                <Sparkles className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h4 className="text-sm font-bold text-slate-900">{t('scheduler.autoRolloverCardTitle')}</h4>
+                  <span className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200/80 px-1.5 py-0.5 rounded font-bold">
+                    {t('scheduler.autoRolloverCardTag')}
+                  </span>
+                  {savingRollover && (
+                    <span className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded font-medium animate-pulse">
+                      ...
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">{t('scheduler.autoRolloverCardDesc')}</p>
+              </div>
+            </div>
+
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={rolloverEnabled}
+                onChange={(e) => handleToggleRollover(e.target.checked)}
+                disabled={!selectedKey || savingRollover}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+            </label>
+          </div>
+
+          {rolloverEnabled && (
+            <div className="p-3.5 bg-white rounded-xl border border-slate-200/80 space-y-3 text-xs animate-in fade-in duration-150">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <span className="font-semibold text-slate-700">{t('scheduler.autoRolloverMinWeeklyRemaining')}</span>
+                  <p className="text-[11px] text-slate-500">{t('scheduler.autoRolloverMinWeeklyRemainingDesc')}</p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className="text-slate-500 text-xs font-mono font-bold">≥</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={minWeeklyRemaining}
+                    onChange={(e) => {
+                      const n = parseFloat(e.target.value);
+                      setMinWeeklyRemaining(isNaN(n) ? 0 : Math.min(100, Math.max(0, n)));
+                    }}
+                    onBlur={(e) => {
+                      const n = parseFloat(e.target.value);
+                      handleUpdateMinRemaining(isNaN(n) ? 0 : n);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const n = parseFloat((e.target as HTMLInputElement).value);
+                        handleUpdateMinRemaining(isNaN(n) ? 0 : n);
+                      }
+                    }}
+                    className="w-16 px-2 py-1 text-xs rounded-lg border border-slate-300 bg-white font-mono font-bold text-center focus:border-blue-500 focus:outline-none shadow-2xs"
+                  />
+                  <span className="text-slate-500 text-xs font-medium">%</span>
+                </div>
+              </div>
+
+              {/* Current Weekly Quota Health Indicator */}
+              <div className="pt-2 border-t border-slate-100 flex items-center justify-between flex-wrap gap-2 text-[11px]">
+                <span className="text-slate-500">
+                  {t('scheduler.autoRolloverCurrentRemaining')}:{' '}
+                  <span className="font-bold font-mono text-slate-800">
+                    {secondaryRemaining !== null ? `${secondaryRemaining.toFixed(1)}%` : t('scheduler.autoRolloverStatusUnlimited')}
+                  </span>
+                </span>
+                <span
+                  className={`font-semibold px-2 py-0.5 rounded-full border ${
+                    secondaryRemaining === null || secondaryRemaining > minWeeklyRemaining
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : secondaryRemaining <= 0
+                      ? 'bg-rose-50 text-rose-700 border-rose-200'
+                      : 'bg-amber-50 text-amber-700 border-amber-200'
+                  }`}
+                >
+                  {secondaryRemaining === null
+                    ? t('scheduler.autoRolloverStatusUnlimited')
+                    : secondaryRemaining <= 0
+                    ? t('scheduler.autoRolloverStatusExhausted')
+                    : secondaryRemaining < minWeeklyRemaining
+                    ? t('scheduler.autoRolloverStatusBelowMin')
+                    : t('scheduler.autoRolloverStatusOk')}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* Overlap Status Bar */}
         <div
           className={`flex items-center justify-between px-3.5 py-2 rounded-xl border text-xs transition-colors ${
@@ -330,7 +502,18 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
             )}
             <span className="font-medium">{overallOverlapStatus.message}</span>
           </div>
-          <span className="text-[11px] text-slate-400 font-mono shrink-0">窗口: 300m (5h)</span>
+          <div className="flex items-center gap-2.5 shrink-0">
+            <span
+              className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border transition-all ${
+                rolloverEnabled
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                  : 'bg-slate-100 text-slate-400 border-slate-200/70'
+              }`}
+            >
+              {rolloverEnabled ? `● ${t('scheduler.autoRolloverActive')}` : `○ ${t('scheduler.autoRolloverInactive')}`}
+            </span>
+            <span className="text-[11px] text-slate-400 font-mono">窗口: 300m (5h)</span>
+          </div>
         </div>
 
         {/* Inline Add Alarm Form */}

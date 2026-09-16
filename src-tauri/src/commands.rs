@@ -449,3 +449,41 @@ pub async fn run_diagnostics() -> Result<Value, String> {
     let report = crate::core::doctor::run_diagnostics().await;
     serde_json::to_value(report).map_err(|e| e.to_string())
 }
+
+/// Returns the auto-rollover configuration for a specific account.
+///
+/// # Arguments
+///
+/// * `identity_key` - Unique account identifier.
+///
+/// # Errors
+///
+/// Returns `Err` if serialization fails.
+#[tauri::command]
+pub async fn get_account_rollover(
+    identity_key: String,
+) -> Result<crate::core::config::AccountRolloverConfig, String> {
+    Ok(crate::core::config::get_account_rollover(&identity_key))
+}
+
+/// Saves the auto-rollover configuration for a specific account.
+///
+/// # Arguments
+///
+/// * `identity_key` - Unique account identifier.
+/// * `enabled` - Whether auto-rollover is enabled for this account.
+/// * `min_weekly_remaining` - Minimum weekly remaining quota percent (0.0 - 100.0).
+///
+/// # Errors
+///
+/// Returns `Err` if saving config fails.
+#[tauri::command]
+pub async fn save_account_rollover(
+    identity_key: String,
+    enabled: bool,
+    min_weekly_remaining: f64,
+) -> Result<String, String> {
+    crate::core::config::save_account_rollover(&identity_key, enabled, min_weekly_remaining)?;
+    Ok("Account rollover configuration saved".to_string())
+}
+

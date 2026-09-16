@@ -76,7 +76,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "preset_models": ["gpt-5.6-luna", "o3-mini", "gpt-4o"],
         "prompt": "ping",
         "skip_if_active": True,
-        "min_interval_hours": 5,
+        "auto_rollover_on_restored": False,
+        "auto_rollover_scope": "current",
+        "auto_rollover_weekly_threshold": 100.0,
+        "account_rollovers": {},
     },
 }
 
@@ -87,6 +90,12 @@ SETTING_KEY_MAPPING: dict[str, tuple[str, str]] = {
     "warmup.prompt": ("trigger", "prompt"),
     "warmup.skip_if_active": ("trigger", "skip_if_active"),
     "warmup.min_interval_hours": ("trigger", "min_interval_hours"),
+    "warmup.auto_rollover_on_restored": ("trigger", "auto_rollover_on_restored"),
+    "warmup.auto_rollover_scope": ("trigger", "auto_rollover_scope"),
+    "warmup.auto_rollover_weekly_threshold": ("trigger", "auto_rollover_weekly_threshold"),
+    "trigger.auto_rollover_on_restored": ("trigger", "auto_rollover_on_restored"),
+    "trigger.auto_rollover_scope": ("trigger", "auto_rollover_scope"),
+    "trigger.auto_rollover_weekly_threshold": ("trigger", "auto_rollover_weekly_threshold"),
     "auto_refresh.enabled": ("auto_refresh", "enabled"),
     "auto_refresh.interval_minutes": ("auto_refresh", "interval_minutes"),
     "auto_refresh.refresh_on_startup": ("auto_refresh", "refresh_on_startup"),
@@ -1221,6 +1230,26 @@ class Store:
         else:
             cfg[key] = val
 
+        self._save_config_atomic(cfg)
+
+    def get_account_rollover(self, identity_key: str) -> dict[str, Any]:
+        cfg = self._load_config()
+        rollovers = cfg.get("trigger", {}).get("account_rollovers", {})
+        return rollovers.get(identity_key, {"enabled": False, "min_weekly_remaining": 0.0})
+
+    def set_account_rollover(
+        self,
+        identity_key: str,
+        enabled: bool,
+        min_weekly_remaining: float = 0.0,
+    ) -> None:
+        cfg = self._load_config()
+        trigger = cfg.setdefault("trigger", {})
+        rollovers = trigger.setdefault("account_rollovers", {})
+        rollovers[identity_key] = {
+            "enabled": bool(enabled),
+            "min_weekly_remaining": max(0.0, min(100.0, float(min_weekly_remaining))),
+        }
         self._save_config_atomic(cfg)
 
     def get_all_settings(self) -> dict[str, str]:
@@ -2579,6 +2608,121 @@ class CodexQ:
             })
 
         return triggered_results
+
+    async def check_and_fire_auto_rollover(
+        self,
+        now_ts: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Check all eligible accounts for 5h quota restoration and trigger auto-rollover if weekly quota is available.
+
+        Args:
+            now_ts: Optional epoch timestamp to evaluate against (defaults to now).
+
+        Returns:
+            A list of execution result dictionaries for triggered auto-rollovers.
+        """
+        now = now_ts or time.time()
+        raw_cfg = self.store._load_config()
+        account_rollovers = raw_cfg.get("trigger", {}).get("account_rollovers", {})
+        legacy_enabled = self.store.get_setting("warmup.auto_rollover_on_restored", "false").lower() == "true"
+
+        if not account_rollovers and not legacy_enabled:
+            return []
+
+        legacy_scope = self.store.get_setting("warmup.auto_rollover_scope", "current").lower()
+        try:
+            legacy_threshold = float(self.store.get_setting("warmup.auto_rollover_weekly_threshold", "100.0") or 100.0)
+        except (ValueError, TypeError):
+            legacy_threshold = 100.0
+
+        all_rows = self.store.account_rows()
+        curr_key = self.get_current_identity_key()
+
+        if not hasattr(self, "_auto_rollover_cooldown"):
+            self._auto_rollover_cooldown = {}
+
+        results = []
+        for r in all_rows:
+            ident_key = r["identity_key"]
+            if r["credential_status"] == "reauth_required":
+                continue
+
+            # Resolve account-level config or legacy fallback
+            if ident_key in account_rollovers:
+                acc_cfg = account_rollovers[ident_key]
+                if not acc_cfg.get("enabled", False):
+                    continue
+                min_remaining = float(acc_cfg.get("min_weekly_remaining", 0.0))
+            elif legacy_enabled:
+                if legacy_scope != "all" and ident_key != curr_key:
+                    continue
+                min_remaining = max(0.0, 100.0 - legacy_threshold)
+            else:
+                continue
+
+            p_used = r["primary_used_percent"]
+            p_resets = r["primary_resets_at"]
+
+            if p_used is None and p_resets is None:
+                continue
+
+            is_active = (p_used is not None and p_resets is not None and p_used > 0 and p_resets > now)
+            if is_active:
+                continue
+
+            s_used = r["secondary_used_percent"]
+            if s_used is not None:
+                s_rem = max(0.0, min(100.0, 100.0 - s_used))
+                if min_remaining <= 0.0:
+                    if s_rem <= 0.0:
+                        continue
+                else:
+                    if s_rem < min_remaining:
+                        continue
+
+            last_attempt = self._auto_rollover_cooldown.get(ident_key, 0)
+            if now - last_attempt < 900:
+                continue
+
+            self._auto_rollover_cooldown[ident_key] = now
+
+            try:
+                res = await self.warmup(
+                    target=ident_key,
+                    force=False,
+                    quiet=True,
+                )
+                item = res[0] if isinstance(res, list) and res else {}
+                status = item.get("status", "success")
+                if status == "success":
+                    try:
+                        await self.refresh_one(ident_key, quiet=True)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                status = "failed"
+                item = {"status": "failed", "error": str(exc)}
+
+            results.append({
+                "identity_key": ident_key,
+                "status": status,
+                "result": item,
+            })
+
+        return results
+
+    def get_account_rollover(self, identity_key: str) -> dict[str, Any]:
+        """Get auto-rollover configuration for an account."""
+        return self.store.get_account_rollover(identity_key)
+
+    def set_account_rollover(
+        self,
+        identity_key: str,
+        enabled: bool,
+        min_weekly_remaining: float = 0.0,
+    ) -> None:
+        """Set auto-rollover configuration for an account."""
+        self.store.set_account_rollover(identity_key, enabled, min_weekly_remaining)
 
 
 # =====================================================================

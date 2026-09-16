@@ -355,7 +355,16 @@ OpenAI 官方客户端采用 **Refresh Token Rotation (RTR)** 机制维护认证
 - **生命周期自闭**：对于 `once` 模式的闹钟，在到达设定时间触发完成后（无论成功执行还是跳过），调度器自动将该闹钟的开关置为停用（`enabled = 0`），保留历史执行记录且不破坏数据，用户后续需要时可再次手动开启。
 - **后台常驻轮询调度器**：
   - **桌面端 (Rust Core)**：在应用启动时由 `src-tauri/src/core/scheduler.rs` 挂载 Tokio 异步后台任务，每 15 秒轮询检查一次满足时钟触发条件的激活闹钟，并具备 75 秒防同分钟重复触发保护；
-  - **Python 伴侣端 (`codexq.py`)**：在 stdio JSON-RPC 守护进程中挂载 `alarm_scheduler` 异步协程，保持一致的调度语义。
+### 6.5 5小时配额恢复自动续窗机制 (Auto-Rollover on 5h Quota Restore)
+- **业务背景**：Codex 5 小时速率限制滑动窗口仅在接收到首个请求时才开始计算到期倒计时。若额度恢复后长时间无请求介入，将浪费宝贵的窗口滚动时间。
+- **状态流转与双重条件校验**：
+  1. **5小时窗口恢复检测**：账号窗口非活跃（`primary_resets_at <= now` 或未在计时，或最新额度已清零 `primary_used_percent == 0`）；
+  2. **周剩余额度保底防线**：用户可为账号配置周最低剩余额度门限（`min_weekly_remaining`，默认为 0.0%）。当前账号周剩余额度 `secondary_remaining = (100.0 - secondary_used_percent)` 必须满足 `secondary_remaining >= min_weekly_remaining`（若门限为 0 则要求 `secondary_remaining > 0`）。若周额度耗尽或已低于保底门限，坚决拦截不触发，防止产生无意义失败或透支宝贵的周额度；
+  3. **防循环自锁机制**：触发成功后即时触发 `refresh_one`，使本地 `quota_latest` 更新并进入新一轮 5 小时活跃状态；同时设立 15 分钟最小触发冷却间隔，杜绝网络波动或异常情况下的重复频发。
+- **账号级精细化配置与交互**：
+  - 配置存储在 `config.json` 的 `trigger.account_rollovers[identity_key]` 中，支持按账号独立开关与设置周最低剩余额度（`min_weekly_remaining`）；
+  - 前端界面收敛在「定时触发」页面中，随上方账号选择器切换即时联动当前账号的自动续窗卡片与状态指示；
+  - 实时展示当前账号的周剩余额度（如 `75.0%`）及就绪/拦截/耗尽状态标签，直观透明。
 
 ---
 

@@ -1,5 +1,7 @@
 //! Account alarm scheduling, 5-hour interval validation, and background runner.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 use chrono::{Datelike, Local, Timelike};
 use rusqlite::params;
@@ -7,6 +9,8 @@ use serde_json::Value;
 
 use super::db::{get_connection, resolve_account, AccountAlarm};
 use super::warmup::trigger_warmup;
+
+static AUTO_ROLLOVER_COOLDOWN: Mutex<Option<HashMap<String, i64>>> = Mutex::new(None);
 
 /// Parses `"HH:MM"` into minutes from midnight (0..1439).
 fn parse_time_to_minutes(t_str: &str) -> Result<i64, String> {
@@ -239,12 +243,146 @@ pub fn delete_account_alarm(id: &str) -> Result<bool, String> {
     Ok(affected > 0)
 }
 
-/// Background ticker checking and firing due alarms.
-pub fn start_alarm_scheduler() {
-    tauri::async_runtime::spawn(async {
+/// Evaluates accounts to see if 5-hour quota has restored while weekly quota is still available,
+/// and if so, triggers a warmup request to roll over the 5-hour quota window immediately.
+pub async fn check_and_fire_auto_rollover(app_handle: Option<&tauri::AppHandle>) {
+    let cfg = super::config::load_config();
+    if cfg.trigger.account_rollovers.is_empty() {
+        return;
+    }
+
+    let accounts = match super::db::list_accounts_with_quota() {
+        Ok(accs) => accs,
+        Err(e) => {
+            log::warn!("Auto-rollover: failed to query accounts with quota: {e}");
+            return;
+        }
+    };
+
+    let now_epoch = chrono::Utc::now().timestamp();
+
+    for account in accounts {
+        let rollover_cfg = match cfg.trigger.account_rollovers.get(&account.identity_key) {
+            Some(rc) if rc.enabled => rc,
+            _ => continue,
+        };
+
+        if account.credential_status == "reauth_required" {
+            continue;
+        }
+
+        // Cooldown check (minimum 15 minutes = 900 seconds per account)
+        {
+            let mut guard = AUTO_ROLLOVER_COOLDOWN.lock().unwrap();
+            let map = guard.get_or_insert_with(HashMap::new);
+            if let Some(&last_epoch) = map.get(&account.identity_key) {
+                if now_epoch - last_epoch < 900 {
+                    continue;
+                }
+            }
+        }
+
+        // 1. Check if 5-hour window is active
+        let p_used = account.primary.used_percent;
+        let p_resets = account.primary.resets_at;
+
+        if p_used.is_none() && p_resets.is_none() {
+            continue;
+        }
+
+        let is_primary_active = match (p_used, p_resets) {
+            (Some(used), Some(resets_at)) => used > 0.0 && resets_at > now_epoch,
+            _ => false,
+        };
+
+        if is_primary_active {
+            // Window is actively counting down, not restored yet
+            continue;
+        }
+
+        // 2. Check if weekly quota is available
+        // User specifies min_weekly_remaining (周最低剩余额度 %).
+        // E.g., if min_weekly_remaining = 0.0, we require remaining > 0.0 (or used < 100.0).
+        // If min_weekly_remaining = 10.0, we require remaining >= 10.0.
+        if let Some(sec_used) = account.secondary.used_percent {
+            let s_remaining = (100.0 - sec_used).clamp(0.0, 100.0);
+            let threshold = rollover_cfg.min_weekly_remaining;
+            let satisfied = if threshold <= 0.0 {
+                s_remaining > 0.0
+            } else {
+                s_remaining >= threshold
+            };
+
+            if !satisfied {
+                log::info!(
+                    "Auto-rollover for [{}] skipped: weekly quota remaining is {:.1}%, required >= {:.1}%",
+                    account.display_name,
+                    s_remaining,
+                    threshold
+                );
+                continue;
+            }
+        }
+
+        // Record cooldown attempt timestamp immediately before trigger
+        {
+            let mut guard = AUTO_ROLLOVER_COOLDOWN.lock().unwrap();
+            let map = guard.get_or_insert_with(HashMap::new);
+            map.insert(account.identity_key.clone(), now_epoch);
+        }
+
+        log::info!(
+            "Auto-rollover triggered for [{}] (5h quota recovered, weekly quota available)",
+            account.display_name
+        );
+
+        let res = trigger_warmup(
+            Some(account.identity_key.clone()),
+            None,
+            None,
+            false,
+            60.0,
+        )
+        .await;
+
+        match res {
+            Ok(val) => {
+                let status = val.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                log::info!(
+                    "Auto-rollover warmup for [{}] finished with status: {status}",
+                    account.display_name
+                );
+                if status == "success" {
+                    let _ = super::probe::refresh_one(&account.identity_key, 15).await;
+                    if let Some(handle) = app_handle {
+                        use tauri::Emitter;
+                        let _ = handle.emit("tray-refresh", ());
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "Auto-rollover warmup failed for [{}]: {e}",
+                    account.display_name
+                );
+            }
+        }
+    }
+}
+
+/// Background ticker checking and firing due alarms and auto-rollover triggers.
+pub fn start_alarm_scheduler(app_handle: Option<tauri::AppHandle>) {
+    tauri::async_runtime::spawn(async move {
         log::info!("Started background account alarm scheduler ticker");
+        let mut ticker_counter: u64 = 0;
         loop {
             tokio::time::sleep(Duration::from_secs(15)).await;
+            ticker_counter = ticker_counter.wrapping_add(1);
+
+            // Check auto-rollover every 30 seconds
+            if ticker_counter % 2 == 0 {
+                check_and_fire_auto_rollover(app_handle.as_ref()).await;
+            }
 
             let now = Local::now();
             let current_hh_mm = format!("{:02}:{:02}", now.hour(), now.minute());

@@ -307,5 +307,48 @@ mod tests {
         });
         assert!(!is_access_token_expired(&api_key_auth, 300));
     }
+
+    #[test]
+    fn test_auto_rollover_settings_and_conditions() {
+        use crate::core::config::{get_account_rollover, save_account_rollover};
+
+        // Initially unconfigured account
+        let initial = get_account_rollover("test_user\x1ftest_acc");
+        assert!(!initial.enabled);
+        assert_eq!(initial.min_weekly_remaining, 0.0);
+
+        // Save account-level rollover settings
+        assert!(save_account_rollover("test_user\x1ftest_acc", true, 20.0).is_ok());
+
+        let updated = get_account_rollover("test_user\x1ftest_acc");
+        assert!(updated.enabled);
+        assert_eq!(updated.min_weekly_remaining, 20.0);
+
+        // Clamping check (>100 or <0)
+        assert!(save_account_rollover("test_user\x1ftest_acc", true, 150.0).is_ok());
+        assert_eq!(get_account_rollover("test_user\x1ftest_acc").min_weekly_remaining, 100.0);
+
+        // Reset
+        let _ = save_account_rollover("test_user\x1ftest_acc", false, 0.0);
+    }
+
+    #[test]
+    fn test_codexq_home_resolution() {
+        use crate::core::paths::codexq_home;
+
+        // With environment override
+        unsafe {
+            std::env::set_var("CODEXQ_HOME", "target/test_codexq_home");
+        }
+        assert_eq!(codexq_home(), std::path::PathBuf::from("target/test_codexq_home"));
+        unsafe {
+            std::env::remove_var("CODEXQ_HOME");
+        }
+
+        // Without override, it points to a valid path
+        let default_home = codexq_home();
+        assert!(!default_home.as_os_str().is_empty());
+    }
 }
+
 

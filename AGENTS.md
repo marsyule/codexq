@@ -80,7 +80,11 @@ python -m unittest discover tests -v
 
 - **Single Source of Truth**: When updating architecture or core logic, update [docs/architecture.md](file:///d:/Code/codexq/docs/architecture.md) or [docs/PROJECT.md](file:///d:/Code/codexq/docs/PROJECT.md) in place.
 - **Task Tracking**: Record active cross-session tasks in [docs/work/current.md](file:///d:/Code/codexq/docs/work/current.md); record completed decisions and post-mortems in [docs/work/history.md](file:///d:/Code/codexq/docs/work/history.md).
-- **Git Version Control**: NEVER create duplicate version files (e.g., `_v2`, `_new`, `_backup`). All change history belongs in Git.
+- **Git Version Control & Staging Hygiene**:
+  - **NEVER create duplicate version files** (e.g., `_v2`, `_new`, `_backup`). All change history belongs in Git.
+  - **No Blind Staging**: Strictly prohibit `git add .` or `git add -A`. Explicitly stage only intended target files.
+  - **Pre-Commit Audit**: ALWAYS inspect changes with `git status` and `git diff --staged` before committing.
+  - **Sensitive Data & Junk Filter**: NEVER commit live tokens/auth files (`auth.json`, session keys), local sandbox databases (`*.db`, `*.db-wal`), test caches, `.env` files, or temporary/scratch files (`*.tmp`, debug dumps, OS metadata).
 
 ---
 

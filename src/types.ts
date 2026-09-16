@@ -80,6 +80,11 @@ export interface AccountAlarm {
   created_at: string;
 }
 
+export interface AccountRolloverConfig {
+  enabled: boolean;
+  min_weekly_remaining: number;
+}
+
 export interface WarmupAppSettings {
   default_model: string;
   preset_models: string[];

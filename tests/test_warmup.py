@@ -246,6 +246,67 @@ class TestWarmupScheduler(unittest.TestCase):
         )
         self.assertEqual(len(triggered_again), 0)
 
+    def test_auto_rollover_on_restored(self):
+        # 1. Verify settings read/write
+        self.store.set_setting("warmup.auto_rollover_on_restored", "true")
+        self.store.set_setting("warmup.auto_rollover_scope", "all")
+        self.store.set_setting("warmup.auto_rollover_weekly_threshold", "98.0")
+        self.assertEqual(self.store.get_setting("warmup.auto_rollover_on_restored"), "true")
+        self.assertEqual(self.store.get_setting("warmup.auto_rollover_scope"), "all")
+        self.assertEqual(self.store.get_setting("warmup.auto_rollover_weekly_threshold"), "98.0")
+
+        # 2. Insert test account with 5h restored (used=0 or resets_at in the past) and weekly has remaining quota (used=20%)
+        now_epoch = int(datetime.now().timestamp())
+        now_iso = datetime.now().isoformat()
+        with self.store.connect() as con:
+            con.execute(
+                """
+                INSERT INTO accounts (
+                    identity_key, profile_id, user_id, account_id, email,
+                    first_seen_at, last_seen_at, last_credential_update, credential_sha256, credential_path
+                )
+                VALUES ('user4\x1facc4', 'prof4', 'user4', 'acc4', 'rollover@example.com', ?, ?, ?, 'sha', 'path')
+                """,
+                (now_iso, now_iso, now_iso),
+            )
+            con.execute(
+                """
+                INSERT INTO quota_latest (
+                    identity_key, limit_id, fetched_at,
+                    primary_used_percent, primary_window_minutes, primary_resets_at,
+                    secondary_used_percent, secondary_window_minutes, secondary_resets_at, raw_json
+                )
+                VALUES ('user4\x1facc4', 'codex', ?, 0.0, 300, ?, 25.0, 10080, ?, '{}')
+                """,
+                (now_iso, now_epoch - 60, now_epoch + 86400 * 5),
+            )
+
+        # 3. Trigger auto-rollover
+        mock_result = [{"status": "success", "message": "warmup sent"}]
+        with patch.object(self.client, "warmup", new=AsyncMock(return_value=mock_result)), \
+             patch.object(self.client, "refresh_one", new=AsyncMock(return_value=True)):
+            results = asyncio.run(self.client.check_and_fire_auto_rollover(now_ts=now_epoch))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["identity_key"], "user4\x1facc4")
+        self.assertEqual(results[0]["status"], "success")
+
+        # 4. Anti-spam check: immediate second run within 900s should be debounced
+        results2 = asyncio.run(self.client.check_and_fire_auto_rollover(now_ts=now_epoch + 10))
+        self.assertEqual(len(results2), 0)
+
+    def test_account_level_rollover(self):
+        # Test get and set account rollover config
+        self.client.set_account_rollover("user5\x1facc5", enabled=True, min_weekly_remaining=15.0)
+        cfg = self.client.get_account_rollover("user5\x1facc5")
+        self.assertTrue(cfg["enabled"])
+        self.assertEqual(cfg["min_weekly_remaining"], 15.0)
+
+        # Unconfigured account should return defaults
+        def_cfg = self.client.get_account_rollover("user_unconfigured")
+        self.assertFalse(def_cfg["enabled"])
+        self.assertEqual(def_cfg["min_weekly_remaining"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

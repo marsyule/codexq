@@ -811,131 +811,125 @@ export function App() {
             </div>
           )}
 
-          {currentTab === 'accounts' ? (
-            <>
-              {/* Section 1: Active Account Hero Banner */}
-              {activeAccount ? (
-                <div>
-                  <div className="flex items-center justify-between mb-1.5 px-0.5">
-                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1">
-                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                      {t('accounts.activeSession')}
+          {/* Tab 1: Accounts Pool */}
+          <div className={currentTab === 'accounts' ? 'space-y-3.5' : 'hidden'}>
+            {/* Section 1: Active Account Hero Banner */}
+            {activeAccount ? (
+              <div>
+                <div className="flex items-center justify-between mb-1.5 px-0.5">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1">
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                    {t('accounts.activeSession')}
+                  </span>
+                  {lastUpdated && (
+                    <span className="text-[10px] text-slate-400">
+                      {t('accounts.synced')}: {lastUpdated.toLocaleTimeString()}
                     </span>
-                    {lastUpdated && (
-                      <span className="text-[10px] text-slate-400">
-                        {t('accounts.synced')}: {lastUpdated.toLocaleTimeString()}
-                      </span>
-                    )}
-                  </div>
-                  <ActiveHeroCard
-                    account={activeAccount}
-                    onEditAlias={(acc) => setAliasAccount(acc)}
-                    onViewHistory={(acc) => setHistoryAccount(acc)}
-                  />
+                  )}
                 </div>
-              ) : !loading && (
-                <div className="rounded-xl border border-dashed border-amber-300 bg-amber-50/70 p-5 text-center shadow-xs">
-                  <AlertCircle className="w-7 h-7 text-amber-600 mx-auto mb-2" />
-                  <h3 className="text-xs font-semibold text-slate-800">{t('accounts.noActiveTitle')}</h3>
-                  <p className="text-[11px] text-slate-500 mt-1 max-w-md mx-auto leading-relaxed">
-                    {t('accounts.noActiveDesc')}
-                  </p>
-                  <div className="mt-3 flex items-center justify-center gap-2">
-                    <button
-                      onClick={() => setShowAddAccountModal(true)}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 shadow-xs shadow-blue-600/20 transition-all"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      <span>{t('accounts.addBtn')}</span>
-                    </button>
-                  </div>
+                <ActiveHeroCard
+                  account={activeAccount}
+                  onEditAlias={(acc) => setAliasAccount(acc)}
+                  onViewHistory={(acc) => setHistoryAccount(acc)}
+                />
+              </div>
+            ) : !loading && (
+              <div className="rounded-xl border border-dashed border-amber-300 bg-amber-50/70 p-5 text-center shadow-xs">
+                <AlertCircle className="w-7 h-7 text-amber-600 mx-auto mb-2" />
+                <h3 className="text-xs font-semibold text-slate-800">{t('accounts.noActiveTitle')}</h3>
+                <p className="text-[11px] text-slate-500 mt-1 max-w-md mx-auto leading-relaxed">
+                  {t('accounts.noActiveDesc')}
+                </p>
+              </div>
+            )}
+
+            {/* Section 2: Inactive Account Pool Cards */}
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between px-0.5">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1">
+                    <Users className="w-3.5 h-3.5 text-blue-600" />
+                    {t('accounts.availablePool')}
+                  </span>
+                  <span className="rounded-full bg-slate-200/80 px-1.5 py-0.2 text-[10px] font-semibold text-slate-700">
+                    {filteredInactive.length}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {searchQuery && (
+                    <span className="text-xs text-slate-400">
+                      {t('accounts.filterCriteria')}: "<span className="text-slate-700 font-medium">{searchQuery}</span>"
+                    </span>
+                  )}
+                  <button
+                    onClick={() => setShowAddAccountModal(true)}
+                    className="flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50/80 px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100 hover:border-blue-300 shadow-xs transition-all"
+                  >
+                    <Plus className="h-3 w-3" />
+                    <span>{t('accounts.addBtn')}</span>
+                  </button>
+                </div>
+              </div>
+
+              {loading ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {[1, 2].map((i) => (
+                    <div
+                      key={i}
+                      className="h-32 rounded-xl border border-slate-200/80 bg-white shadow-xs animate-pulse"
+                    />
+                  ))}
+                </div>
+              ) : filteredInactive.length === 0 ? (
+                <div className="rounded-xl border border-slate-200/90 bg-white p-6 text-center shadow-xs">
+                  {accounts.length <= 1 ? (
+                    <div className="space-y-2.5 max-w-md mx-auto py-1">
+                      <p className="text-xs text-slate-700 font-semibold">{t('accounts.noOtherAccounts')}</p>
+                      <p className="text-[11px] text-slate-500 leading-relaxed">
+                        {t('accounts.noOtherAccountsDesc')}
+                      </p>
+                      <button
+                        onClick={() => setShowAddAccountModal(true)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-slate-900 shadow-xs transition-all mt-1"
+                      >
+                        <Plus className="h-3.5 w-3.5 text-blue-600" />
+                        <span>{t('accounts.addBtn')}</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-500">{t('accounts.noSearchResults')}</p>
+                  )}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {filteredInactive.map((account) => (
+                    <AccountCard
+                      key={account.identity_key}
+                      account={account}
+                      onSwitch={handleSwitchAccount}
+                      onEditAlias={(acc) => setAliasAccount(acc)}
+                      onViewHistory={(acc) => setHistoryAccount(acc)}
+                      onRemove={(acc) => setRemoveTargetAccount(acc)}
+                      isSwitching={switchingId === account.identity_key}
+                    />
+                  ))}
                 </div>
               )}
+            </div>
+          </div>
 
-              {/* Section 2: Account Pool / Other Registered Accounts */}
-              <div>
-                <div className="flex items-center justify-between mb-2 px-0.5">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1">
-                      <Users className="w-3.5 h-3.5 text-blue-600" />
-                      {t('accounts.availablePool')}
-                    </span>
-                    <span className="rounded-full bg-slate-200/80 px-1.5 py-0.2 text-[10px] font-semibold text-slate-700">
-                      {filteredInactive.length}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {searchQuery && (
-                      <span className="text-xs text-slate-400">
-                        {t('accounts.filterCriteria')}: "<span className="text-slate-700 font-medium">{searchQuery}</span>"
-                      </span>
-                    )}
-                    <button
-                      onClick={() => setShowAddAccountModal(true)}
-                      className="flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50/80 px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100 hover:border-blue-300 shadow-xs transition-all"
-                    >
-                      <Plus className="h-3 w-3" />
-                      <span>{t('accounts.addBtn')}</span>
-                    </button>
-                  </div>
-                </div>
-
-                {loading ? (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {[1, 2].map((i) => (
-                      <div
-                        key={i}
-                        className="h-32 rounded-xl border border-slate-200/80 bg-white shadow-xs animate-pulse"
-                      />
-                    ))}
-                  </div>
-                ) : filteredInactive.length === 0 ? (
-                  <div className="rounded-xl border border-slate-200/90 bg-white p-6 text-center shadow-xs">
-                    {accounts.length <= 1 ? (
-                      <div className="space-y-2.5 max-w-md mx-auto py-1">
-                        <p className="text-xs text-slate-700 font-semibold">{t('accounts.noOtherAccounts')}</p>
-                        <p className="text-[11px] text-slate-500 leading-relaxed">
-                          {t('accounts.noOtherAccountsDesc')}
-                        </p>
-                        <button
-                          onClick={() => setShowAddAccountModal(true)}
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-slate-900 shadow-xs transition-all mt-1"
-                        >
-                          <Plus className="h-3.5 w-3.5 text-blue-600" />
-                          <span>{t('accounts.addBtn')}</span>
-                        </button>
-                      </div>
-                    ) : (
-                      <p className="text-xs text-slate-500">{t('accounts.noSearchResults')}</p>
-                    )}
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {filteredInactive.map((account) => (
-                      <AccountCard
-                        key={account.identity_key}
-                        account={account}
-                        onSwitch={handleSwitchAccount}
-                        onEditAlias={(acc) => setAliasAccount(acc)}
-                        onViewHistory={(acc) => setHistoryAccount(acc)}
-                        onRemove={(acc) => setRemoveTargetAccount(acc)}
-                        isSwitching={switchingId === account.identity_key}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            </>
-          ) : currentTab === 'scheduler' ? (
+          {/* Tab 2: Scheduled Trigger */}
+          <div className={currentTab === 'scheduler' ? 'space-y-4' : 'hidden'}>
             <SchedulerView
               accounts={accounts}
               onRefreshAccounts={fetchAccounts}
               showToast={showToast}
             />
-          ) : (
-            /* Settings Tab */
-            <div className="space-y-6">
+          </div>
+
+          {/* Tab 3: Settings */}
+          <div className={currentTab === 'settings' ? 'space-y-6' : 'hidden'}>
               {/* General & Preferences Card */}
               <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs space-y-4">
                 <div className="flex items-center justify-between pb-2 border-b border-slate-100">
@@ -1297,7 +1291,6 @@ export function App() {
                 </div>
               </div>
             </div>
-          )}
         </main>
       </div>
 

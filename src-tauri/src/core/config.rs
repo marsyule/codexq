@@ -47,6 +47,28 @@ fn default_min_interval_hours() -> u32 {
     5
 }
 
+fn default_zero_f64() -> f64 {
+    0.0
+}
+
+/// Account-level auto-rollover configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountRolloverConfig {
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+    #[serde(default = "default_zero_f64")]
+    pub min_weekly_remaining: f64,
+}
+
+impl Default for AccountRolloverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_weekly_remaining: 0.0,
+        }
+    }
+}
+
 /// Root structure of `config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -129,6 +151,8 @@ pub struct TriggerConfig {
     pub skip_if_active: bool,
     #[serde(default = "default_min_interval_hours")]
     pub min_interval_hours: u32,
+    #[serde(default)]
+    pub account_rollovers: HashMap<String, AccountRolloverConfig>,
 }
 
 impl Default for TriggerConfig {
@@ -139,6 +163,7 @@ impl Default for TriggerConfig {
             prompt: default_prompt(),
             skip_if_active: default_true(),
             min_interval_hours: default_min_interval_hours(),
+            account_rollovers: HashMap::new(),
         }
     }
 }
@@ -315,5 +340,48 @@ pub fn set_setting(key: &str, value: &str) -> Result<(), String> {
         }
     }
 
+    save_config(&cfg)
+}
+
+/// Returns the auto-rollover configuration for a specific account identity key.
+///
+/// # Arguments
+///
+/// * `identity_key` - Unique account identifier (user_id\x1faccount_id).
+#[must_use]
+pub fn get_account_rollover(identity_key: &str) -> AccountRolloverConfig {
+    let cfg = load_config();
+    cfg.trigger
+        .account_rollovers
+        .get(identity_key)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Saves the auto-rollover configuration for a specific account identity key.
+///
+/// # Arguments
+///
+/// * `identity_key` - Unique account identifier (user_id\x1faccount_id).
+/// * `enabled` - Whether auto-rollover is enabled for this account.
+/// * `min_weekly_remaining` - Minimum weekly remaining quota percent (0.0 - 100.0) required to trigger rollover.
+///
+/// # Errors
+///
+/// Returns `Err` if saving the updated config fails.
+pub fn save_account_rollover(
+    identity_key: &str,
+    enabled: bool,
+    min_weekly_remaining: f64,
+) -> Result<(), String> {
+    let mut cfg = load_config();
+    let clamped_min = min_weekly_remaining.clamp(0.0, 100.0);
+    cfg.trigger.account_rollovers.insert(
+        identity_key.to_string(),
+        AccountRolloverConfig {
+            enabled,
+            min_weekly_remaining: clamped_min,
+        },
+    );
     save_config(&cfg)
 }

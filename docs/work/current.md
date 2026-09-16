@@ -192,6 +192,27 @@
   - [x] **调用链统一**：`handleLanguageChange` 改为派发 `{ key: 'toasts.languageChanged' }`；同时梳理更新所有账号、排期与设置开关的 Toast 为响应式 key。
   - [x] **全量验证**：前端 TypeScript 严格检查与 Vite 生产构建通过，Release 二进制打包验证无误。
 
+### 任务 16：5小时配额恢复自动续窗与周配额安全拦截 (Auto-Rollover on 5h Quota Restore)
+- **目标**：实现 5 小时配额恢复可用且 1 周内尚有配额时的自动续窗（自动垫刀）功能，解决空闲期窗口中断错位问题，同时严密拦截周限额耗尽场景。
+- **状态**：已完成
+- **检查清单**：
+  - [x] **架构与配置设计**：在 `~/.codexq/config.json` 的 `trigger` 节点扩展 `account_rollovers: HashMap<String, AccountRolloverConfig>` 配置定义，支持按账号精细化独立配置。
+  - [x] **Rust Core 核心引擎**：在 `scheduler.rs` 中实现 `check_and_fire_auto_rollover`，每 30 秒轮询检查已恢复账号；对齐 5 小时恢复状态与周剩余额度保底门限（`min_weekly_remaining`，默认为 0.0%）；注入 15 分钟防死循环冷却与成功后即时触发 `refresh_one` 刷新新窗口。
+  - [x] **Python Companion 伴侣端**：在 `codexq.py` 中同步支持 `get_account_rollover` 与 `set_account_rollover`，保持纯标准库零外部依赖与向前兼容性。
+  - [x] **UI 与双语国际化**：将自动续窗配置收敛至【定时触发】(`SchedulerView.tsx`) 页面中，随当前选中的账号即时联动，支持“启用自动续窗”与“周最低剩余额度 ≥ [ 0 ] %”设定，并实时展示当前账号周剩余额度状态；移除全局设置中的粗粒度开关；补齐 `zh-CN.json` 与 `en-US.json` 全套双语翻译。
+  - [x] **端到端测试与构建**：Rust 单元测试全部通过 (10/10)，Python 单元测试全部通过 (32/32)，前端生产构建 (`tsc -b && vite build`) 零错误。
+
+### 任务 17：Tab 切页内存保活与绿色免安装便携版 (DOM Keep-Alive & Windows Portable EXE)
+- **目标**：解决切换标签页导致「定时触发」选中账号被重置回当前活跃账号的体验问题；遵循零 LocalStorage 内存保活要求；并在 Windows 平台提供免安装绿色单二进制可执行文件 (`CodexQ-v1.0.0-portable.exe` 与便携压缩包)。
+- **状态**：已完成
+- **检查清单**：
+  - [x] **Tab 内存保活 (CSS Keep-Alive)**：将 `App.tsx` 中的条件挂载渲染 (`currentTab === ... ? ... : null`) 改造为桌面端标准的 CSS `hidden` 常驻显隐，使得应用运行期间 Tab 切换 0ms 瞬间显示且选中状态、输入框等内存状态全程保持；应用完全退出冷启动时，组件首次挂载自然重置回当前系统活跃账号，避免 LocalStorage 跨会话脏状态。
+  - [x] **Windows 免安装便携版 (Portable EXE)**：
+    - 在 `src-tauri/src/core/paths.rs` 引入便携模式支持：检测到当前可执行文件同级目录存在 `portable` 标记文件或 `data/` 目录时，自动将数据与配置沙箱重定向至 `./data`，实现真正的“U盘随身携带、不留宿主痕迹”。
+    - 编写 `scripts/package-release.mjs` 与 `scripts/build-portable.mjs`，在 `release/` 输出 `CodexQ-v1.0.0-portable.exe`（单文件免安装）与 `CodexQ-v1.0.0-windows-x64-portable.zip`（便携包，压缩后仅 5.2MB）。
+    - 在 `package.json` 中配置便捷命令：`pnpm run build:portable` 与 `pnpm run package`。
+  - [x] **全套测试与验证**：Rust 单元测试全部通过 (11/11)，Python 单元测试全部通过 (32/32)，前端生产构建通过。
+
 ## 3. 已知技术债与待优化项 (Tech Debt)
 
 1. **单文件维护性**：`codexq.py` 目前约 3500 行代码，保持单文件标准库免安装即用的同时，通过详尽的 29+ 项单元测试套件保证稳定性。

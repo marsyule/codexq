@@ -86,7 +86,20 @@
     },
     "emptyTitle": "No Scheduled Alarms",
     "emptyDesc": "Click the button above to add a trigger schedule for the selected account.",
-    "intervalError": "Alarms must be scheduled at least 5 hours apart to avoid window overlap."
+    "intervalError": "Alarms must be scheduled at least 5 hours apart to avoid window overlap.",
+    "autoRolloverActive": "Auto-rollover active",
+    "autoRolloverInactive": "Auto-rollover off",
+    "autoRolloverCardTitle": "Auto-Rollover on 5h Restore",
+    "autoRolloverCardTag": "Auto-Rollover",
+    "autoRolloverCardDesc": "When this account's 5-hour quota recovers to full and weekly quota is available, automatically trigger a probe to wake up a new 5-hour quota window.",
+    "autoRolloverEnable": "Enable Auto-Rollover for this Account",
+    "autoRolloverMinWeeklyRemaining": "Min Weekly Remaining Quota",
+    "autoRolloverMinWeeklyRemainingDesc": "Auto-rollover halts when weekly remaining quota falls below this percentage (0 means trigger as long as quota remains; e.g. 10 reserves a 10% safety buffer).",
+    "autoRolloverCurrentRemaining": "Weekly Quota Remaining",
+    "autoRolloverStatusOk": "Healthy & ready",
+    "autoRolloverStatusExhausted": "Weekly quota exhausted (Paused)",
+    "autoRolloverStatusBelowMin": "Below safety threshold (Protected)",
+    "autoRolloverStatusUnlimited": "No weekly limit"
   },
   "trash": {
     "title": "Trash (Soft-deleted Accounts)",
@@ -230,7 +243,10 @@
     "autoRefreshEnabled": "Auto-refresh enabled (every {{mins}} mins)",
     "autoRefreshPaused": "Auto-refresh paused",
     "dynamicResetEnabled": "JIT dynamic reset refresh enabled",
-    "dynamicResetDisabled": "JIT dynamic reset refresh disabled"
+    "dynamicResetDisabled": "JIT dynamic reset refresh disabled",
+    "autoRolloverEnabled": "Auto-rollover enabled for this account",
+    "autoRolloverDisabled": "Auto-rollover disabled for this account",
+    "autoRolloverSaved": "Auto-rollover settings saved"
   },
   "addAccount": {
     "btn": "Add Account",
