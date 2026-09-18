@@ -221,7 +221,8 @@
   - [x] 在 `src-tauri/src/lib.rs` 的 Builder 链首部注册 single-instance 插件（显式限定 `#[cfg(desktop)]`）
   - [x] 按运行环境精细化作用域（Dev 追加 `.dev`、Portable 追加 `.portable`、正式安装版全局互斥），杜绝开发调试与正式运行相互误杀
   - [x] 触发时调用 `window.show()`、`window.unminimize()` 与 `window.set_focus()` 唤醒主窗口并完善 `log::warn!` 可观测性
-  - [x] 机械验证：`cargo check`、`cargo test` 与 `pnpm run build` 全部通过
+  - [x] 修复 Portable 首次冷启动识别：增强 `is_portable()` 检测可执行文件名包含 `portable`（不区分大小写），并在便携 ZIP 归档中内置打包 `portable` 标记文件，确保首次运行即可精准定位 `./data` 与 `.portable` 单实例作用域
+  - [x] 机械验证：`cargo check`、`cargo test` (12/12) 与 `pnpm run build` 全部通过
 
 ## 3. 已知技术债与待优化项 (Tech Debt)
 

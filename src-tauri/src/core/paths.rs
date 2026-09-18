@@ -2,17 +2,35 @@
 
 use std::path::PathBuf;
 
-/// Returns whether CodexQ is running in portable mode (local `portable` file or `data/` directory exists).
+/// Helper to determine if a given executable path represents portable mode.
+#[must_use]
+pub fn check_is_portable_for_path(exe_path: &std::path::Path) -> bool {
+    let is_portable_filename = exe_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase().contains("portable"))
+        .unwrap_or(false);
+
+    if is_portable_filename {
+        return true;
+    }
+
+    if let Some(exe_dir) = exe_path.parent() {
+        let portable_marker = exe_dir.join("portable");
+        let data_dir = exe_dir.join("data");
+        if portable_marker.exists() || data_dir.is_dir() {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Returns whether CodexQ is running in portable mode (local `portable` file, `data/` directory, or exe filename containing "portable").
 #[must_use]
 pub fn is_portable() -> bool {
     if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let portable_marker = exe_dir.join("portable");
-            let data_dir = exe_dir.join("data");
-            if portable_marker.exists() || data_dir.is_dir() {
-                return true;
-            }
-        }
+        return check_is_portable_for_path(&exe_path);
     }
     false
 }
