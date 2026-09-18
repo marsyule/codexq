@@ -2,6 +2,21 @@
 
 use std::path::PathBuf;
 
+/// Returns whether CodexQ is running in portable mode (local `portable` file or `data/` directory exists).
+#[must_use]
+pub fn is_portable() -> bool {
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let portable_marker = exe_dir.join("portable");
+            let data_dir = exe_dir.join("data");
+            if portable_marker.exists() || data_dir.is_dir() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Returns the base directory for CodexQ data (`~/.codexq`, `$CODEXQ_HOME`, or `./data` in portable mode).
 #[must_use]
 pub fn codexq_home() -> PathBuf {
@@ -10,12 +25,10 @@ pub fn codexq_home() -> PathBuf {
             return PathBuf::from(val.trim());
         }
     }
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let portable_marker = exe_dir.join("portable");
-            let data_dir = exe_dir.join("data");
-            if portable_marker.exists() || data_dir.is_dir() {
-                return data_dir;
+    if is_portable() {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                return exe_dir.join("data");
             }
         }
     }
