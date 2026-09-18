@@ -349,6 +349,31 @@ mod tests {
         let default_home = codexq_home();
         assert!(!default_home.as_os_str().is_empty());
     }
+
+    #[test]
+    fn test_is_portable_detection() {
+        use crate::core::paths::check_is_portable_for_path;
+        use std::path::Path;
+
+        // 1. Filename contains "portable" (case-insensitive)
+        assert!(check_is_portable_for_path(Path::new("C:/Apps/CodexQ-v1.0.1-portable.exe")));
+        assert!(check_is_portable_for_path(Path::new("C:/Apps/codexq_PORTABLE.exe")));
+        assert!(!check_is_portable_for_path(Path::new("C:/Program Files/CodexQ/CodexQ.exe")));
+
+        // 2. Directory contains "portable" marker file
+        let temp_dir = std::env::temp_dir().join(format!("codexq_test_portable_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let marker = temp_dir.join("portable");
+        let exe_in_temp = temp_dir.join("CodexQ.exe");
+
+        assert!(!check_is_portable_for_path(&exe_in_temp));
+        let _ = std::fs::write(&marker, "portable");
+        assert!(check_is_portable_for_path(&exe_in_temp));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&marker);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
 
 

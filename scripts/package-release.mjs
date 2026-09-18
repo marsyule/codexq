@@ -42,11 +42,22 @@ deliverables.push({
 // 2. Portable ZIP
 const portableZipName = `CodexQ-v${version}-windows-x64-portable.zip`;
 const portableZipDest = path.join(releaseDir, portableZipName);
+const portableStagingDir = path.join(releaseDir, '.portable_staging');
 try {
-  // Use Windows built-in tar or PowerShell to create clean zip
-  execSync(`tar -a -cf "${portableZipDest}" -C "${targetReleaseDir}" CodexQ.exe`, {
+  if (fs.existsSync(portableStagingDir)) {
+    fs.rmSync(portableStagingDir, { recursive: true, force: true });
+  }
+  fs.mkdirSync(portableStagingDir, { recursive: true });
+  fs.copyFileSync(rawExePath, path.join(portableStagingDir, 'CodexQ.exe'));
+  fs.writeFileSync(
+    path.join(portableStagingDir, 'portable'),
+    'This file indicates CodexQ is running in portable mode.\nData will be stored in ./data directory.\n'
+  );
+  // Use Windows built-in tar to create clean zip with CodexQ.exe and portable marker
+  execSync(`tar -a -cf "${portableZipDest}" -C "${portableStagingDir}" CodexQ.exe portable`, {
     stdio: 'ignore',
   });
+  fs.rmSync(portableStagingDir, { recursive: true, force: true });
   if (fs.existsSync(portableZipDest)) {
     const zipStats = fs.statSync(portableZipDest);
     deliverables.push({
@@ -58,6 +69,9 @@ try {
   }
 } catch (e) {
   console.warn('⚠️ Could not create zip archive via tar:', e.message);
+  if (fs.existsSync(portableStagingDir)) {
+    fs.rmSync(portableStagingDir, { recursive: true, force: true });
+  }
 }
 
 // 3. NSIS Setup Installer (if present)
