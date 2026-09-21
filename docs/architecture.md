@@ -495,13 +495,15 @@ CodexQ 在保留官方多账号 5H/周度额度探针与防损切号能力的同
 - 若 `model_provider` 缺失、为 `"openai"` 或指向未知 id，则视为官方模式，**保留用户自定义的 `model` 与其它配置**；
 - 之后按 §3.2 的原子流程写入目标账号凭据。
 
+> **Python 端对等实现**：`codexq.py` 的 `lift_codex_config_provider()` 与上述语义逐条对齐——读取顶层 `model_provider`，非官方时移除顶层 `model` / `model_provider` 与匹配的 `[model_providers.<id>]`（含其子表，明文 bearer token 随之清除），并始终清除根级 `model_catalog_json`；`model_provider = "openai"` 或缺失时仅做 `model_catalog_json` 清理，保留用户官方 `model`。
+
 **快照有界**：`MAX_RUNTIME_SNAPSHOTS = 20`，每次切换后裁剪最旧的 `~/.codexq/backups/<ts>_<reason>`，避免明文凭据备份无限增长。
 
 **官方 id 归一**：`is_official_provider_id()` 将 `openai` 视为官方路由，避免把官方默认配置误判为第三方模式（Rust / Python 行为一致）。
 
 ### 8.3 `config.toml` 无损注入与非法键禁令
 - **Rust 端**：使用 `toml_edit::DocumentMut` 就地修改承载用户配置的文档树，完整保留注释、缩进与未触碰的表（含 MCP 服务声明）。
-- **Python 端**：受 Python 3.10+ 纯标准库约束（`tomllib` 只读），采用逐行解析实现等价语义：顶层键就地替换/插入，`[model_providers.<id>]` 表整表重写，其余行原样透传。
+- **Python 端**：受 Python 3.10+ 纯标准库约束（`tomllib` 只读），采用逐行解析实现等价语义：顶层键就地替换/插入，`[model_providers.<id>]` 表整表重写；`lift_codex_config_provider()` 反向操作时按表头精确匹配（`model_providers.<id>` 及其 `.<id>.` 子表）整表删除，不影响相邻服务商表，其余行原样透传。
 - **标准注入内容**：
   ```toml
   model = "<active-model>"

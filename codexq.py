@@ -690,8 +690,87 @@ def update_codex_config_for_provider(
     atomic_write(config_path, "".join(out_lines).encode("utf-8"), mode=0o600)
 
 
+_TOML_TABLE_KEY_RE = re.compile(r"^([A-Za-z0-9_.\-]+)\s*=")
+
+
+def _toml_table_header(line: str) -> str | None:
+    """Extract the dotted key path from a TOML table header line.
+
+    Args:
+        line: A single raw config.toml line (may include indentation and a trailing comment).
+
+    Returns:
+        The dotted key path inside the header brackets, or None when the line is not a header.
+    """
+    stripped = line.strip()
+    if not stripped.startswith("["):
+        return None
+    if stripped.startswith("[["):
+        end = stripped.find("]]")
+        inner = stripped[2:end] if end != -1 else stripped[2:]
+    else:
+        end = stripped.find("]")
+        inner = stripped[1:end] if end != -1 else stripped[1:]
+    return inner.strip()
+
+
+def _toml_top_level_key(line: str) -> str | None:
+    """Extract the assignment key from a TOML key/value line.
+
+    Args:
+        line: A single raw config.toml line.
+
+    Returns:
+        The bare key name before the `=`, or None for blank lines, comments, and table headers.
+    """
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or stripped.startswith("["):
+        return None
+    match = _TOML_TABLE_KEY_RE.match(stripped)
+    return match.group(1) if match else None
+
+
+def _toml_top_level_string(content: str, key: str) -> str | None:
+    """Read a top-level TOML string value written before any table header.
+
+    Args:
+        content: Full config.toml text.
+        key: Bare top-level key to look up (e.g. `"model_provider"`).
+
+    Returns:
+        The unquoted string value, or None when the key is absent or the value is empty.
+    """
+    pattern = re.compile(rf"^{re.escape(key)}\s*=\s*(.+)$")
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            break
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = pattern.match(stripped)
+        if not match:
+            continue
+        raw = match.group(1).strip()
+        if raw.startswith(("'", '"')):
+            quote = raw[0]
+            end = raw.find(quote, 1)
+            value = raw[1:end] if end != -1 else raw[1:]
+        else:
+            value = raw.split("#", 1)[0].strip()
+        return value or None
+    return None
+
+
 def lift_codex_config_provider(config_path: Path) -> None:
     """Remove third-party provider overrides from ~/.codex/config.toml to restore official routing.
+
+    Mirrors the Rust/Tauri `switch_account` behavior: when the active top-level
+    `model_provider` points at a non-official provider, the `model`/`model_provider` pair is
+    dropped along with the matching `[model_providers.<id>]` table (which holds the plaintext
+    bearer token). User-authored official routing (`model_provider = "openai"`, or a bare
+    `model` without a provider override) is preserved, and every other table, comment, and MCP
+    definition is left untouched. The unsupported root-level `model_catalog_json` residual is
+    always purged.
 
     Args:
         config_path: Path to host config.toml file.
@@ -703,27 +782,43 @@ def lift_codex_config_provider(config_path: Path) -> None:
     except OSError:
         return
 
-    lines = content.splitlines(keepends=True)
+    # The built-in `openai` provider id (and an absent provider) means official routing.
+    active_provider = _toml_top_level_string(content, "model_provider")
+    drop_provider = bool(active_provider) and active_provider.strip().lower() != "openai"
+
+    drop_keys = {"model_catalog_json"}
+    removed_table_prefix: str | None = None
+    if drop_provider:
+        drop_keys.update({"model", "model_provider"})
+        removed_table_prefix = f"model_providers.{active_provider}"
+
     out_lines: list[str] = []
     passed_top_level = False
+    in_removed_table = False
     changed = False
 
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("["):
+    for line in content.splitlines(keepends=True):
+        header = _toml_table_header(line)
+        if header is not None:
             passed_top_level = True
-
-        if not passed_top_level:
-            if (
-                stripped.startswith("model =")
-                or stripped.startswith("model=")
-                or stripped.startswith("model_provider =")
-                or stripped.startswith("model_provider=")
-                or stripped.startswith("model_catalog_json =")
-                or stripped.startswith("model_catalog_json=")
-            ):
+            in_removed_table = bool(
+                removed_table_prefix
+                and (
+                    header == removed_table_prefix
+                    or header.startswith(removed_table_prefix + ".")
+                )
+            )
+            if in_removed_table:
                 changed = True
                 continue
+        elif in_removed_table:
+            # Body line belonging to the provider table being purged.
+            changed = True
+            continue
+        elif not passed_top_level and _toml_top_level_key(line) in drop_keys:
+            changed = True
+            continue
+
         out_lines.append(line)
 
     if changed:
@@ -746,22 +841,8 @@ def read_codex_config_active_provider(config_path: Path) -> tuple[str | None, st
     except OSError:
         return None, None
 
-    active_provider: str | None = None
-    active_model: str | None = None
-
-    for line in content.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("["):
-            break
-        if stripped.startswith("model_provider"):
-            parts = stripped.split("=", 1)
-            if len(parts) == 2:
-                active_provider = parts[1].strip().strip('"').strip("'")
-        elif stripped.startswith("model") and not stripped.startswith("model_"):
-            parts = stripped.split("=", 1)
-            if len(parts) == 2:
-                active_model = parts[1].strip().strip('"').strip("'")
-
+    active_provider = _toml_top_level_string(content, "model_provider")
+    active_model = _toml_top_level_string(content, "model")
     return (active_provider if active_provider else None, active_model if active_model else None)
 
 

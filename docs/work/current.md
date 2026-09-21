@@ -339,6 +339,17 @@
   - [x] **代码/文档契约落差修复**：文档曾声称 CLI 支持 `--context-window`，但 `build_parser` 中该参数从未注册、`cmd_provider` 也未把 `context_window` 传给 `upsert_provider`。本次补齐参数注册与接线，并在 `tests/test_provider.py` 新增 `test_cli_provider_add_supports_context_window` 覆盖「生效值 + 256K 保底 clamp」。
   - [x] **全量机械校验**：Python 单元测试 40/40 通过（原 39 + 新增 1）；真实 `~/.codex/model-catalogs` 与 `~/.codexq` 未被测试写入。
 
+### 任务 24：Python 端 Provider → 官方切换残留修复 (Python Provider Lift Parity)
+- **目标**：修复 `8af470c` 引入第三方 Provider 后，Python CLI（`python codexq.py switch <official-account>`）切回官方账号时遗留 `[model_providers.<id>]` 表与明文 `experimental_bearer_token`、且与 Rust/Tauri 行为不一致的问题。
+- **状态**：已完成
+- **检查清单**：
+  - [x] **根因**：`lift_codex_config_provider()` 仅清理顶层 `model` / `model_provider` / `model_catalog_json`，未删除第三方 Provider 表，导致明文 API Key 残留。
+  - [x] **语义对齐 Rust**：重写 `lift_codex_config_provider()`，读取顶层 `model_provider`；非官方（非 `openai` 且非空）时移除顶层 `model`/`model_provider`，并按表头精确匹配删除 `[model_providers.<id>]` 及其 `.<id>.` 子表；始终清除根级 `model_catalog_json`。
+  - [x] **不误删用户配置**：`model_provider = "openai"` 或缺失时仅做 `model_catalog_json` 清理，保留用户官方 `model`；注释、MCP 表、`cli_auth_credentials_store` 与无关 Provider 表逐行透传不动。
+  - [x] **辅助函数抽取**：新增 `_toml_table_header` / `_toml_top_level_key` / `_toml_top_level_string` 纯函数，`read_codex_config_active_provider()` 复用同一解析逻辑，消除顶层键匹配的松散行为。
+  - [x] **回归测试**：`tests/test_provider.py` 新增 Case 1–4：第三方→官方清除表与密钥、保留其他 Provider、官方 `openai` 配置不误删、遗留 `model_catalog_json` 无论模式均清除。
+  - [x] **全量机械校验**：Python 单元测试 44/44 通过；Rust 单元测试 15/15 通过（`cargo test`）。
+
 ## 3. 已知技术债与待优化项 (Tech Debt)
 
 1. **单文件维护性**：`codexq.py` 保持单文件标准库免安装即用，通过详尽的 39 项单元测试套件保证稳定性。

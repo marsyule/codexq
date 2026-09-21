@@ -229,6 +229,105 @@ class TestProviderIntegration(unittest.TestCase):
         clamped = run_add("CLI Clamp", "128000")
         self.assertEqual(clamped["context_window"], 256_000)
 
+    def test_lift_third_party_provider_purges_table_and_secret(self):
+        """Case 1: switching a third-party provider back to official removes table and key."""
+        config_path = self.auth_path.parent / "config.toml"
+        config_path.write_text(
+            "# user config\n"
+            'cli_auth_credentials_store = "file"\n'
+            "\n"
+            'model = "deepseek-chat"\n'
+            'model_provider = "deepseek"\n'
+            "\n"
+            "[model_providers.deepseek]\n"
+            'name = "DeepSeek"\n'
+            'base_url = "https://api.deepseek.com/v1"\n'
+            'wire_api = "responses"\n'
+            'experimental_bearer_token = "sk-secret"\n'
+            "\n"
+            "[mcp_servers.local_filesystem]\n"
+            'command = "npx"\n',
+            encoding="utf-8",
+        )
+
+        lift_codex_config_provider(config_path)
+
+        text = config_path.read_text(encoding="utf-8")
+        self.assertNotIn('model_provider = "deepseek"', text)
+        self.assertNotIn('model = "deepseek-chat"', text)
+        self.assertNotIn("[model_providers.deepseek]", text)
+        self.assertNotIn("experimental_bearer_token", text)
+        self.assertNotIn("sk-secret", text)
+        # Unrelated user configuration must survive intact.
+        self.assertIn('cli_auth_credentials_store = "file"', text)
+        self.assertIn("[mcp_servers.local_filesystem]", text)
+        self.assertIn("# user config", text)
+
+    def test_lift_preserves_other_unrelated_providers(self):
+        """Case 2: only the active provider table is removed; siblings are preserved."""
+        config_path = self.auth_path.parent / "config.toml"
+        config_path.write_text(
+            'model = "deepseek-chat"\n'
+            'model_provider = "deepseek"\n'
+            "\n"
+            "[model_providers.deepseek]\n"
+            'experimental_bearer_token = "sk-deepseek"\n'
+            "\n"
+            "[model_providers.openrouter]\n"
+            'experimental_bearer_token = "sk-openrouter"\n',
+            encoding="utf-8",
+        )
+
+        lift_codex_config_provider(config_path)
+
+        text = config_path.read_text(encoding="utf-8")
+        self.assertNotIn("[model_providers.deepseek]", text)
+        self.assertNotIn("sk-deepseek", text)
+        # The unrelated provider must be preserved; never delete the whole [model_providers].
+        self.assertIn("[model_providers.openrouter]", text)
+        self.assertIn('experimental_bearer_token = "sk-openrouter"', text)
+
+    def test_lift_keeps_official_openai_config(self):
+        """Case 3: user-authored official routing must not be mis-pruned."""
+        config_path = self.auth_path.parent / "config.toml"
+        config_path.write_text(
+            'model = "gpt-5.6-codex"\n'
+            'model_provider = "openai"\n',
+            encoding="utf-8",
+        )
+
+        lift_codex_config_provider(config_path)
+
+        text = config_path.read_text(encoding="utf-8")
+        self.assertIn('model = "gpt-5.6-codex"', text)
+        self.assertIn('model_provider = "openai"', text)
+
+    def test_lift_always_purges_legacy_model_catalog_json(self):
+        """Case 4: the unsupported root-level model_catalog_json is always removed."""
+        provider_config = self.auth_path.parent / "provider.toml"
+        provider_config.write_text(
+            'model = "deepseek-chat"\n'
+            'model_provider = "deepseek"\n'
+            'model_catalog_json = "/tmp/catalog.json"\n'
+            "\n"
+            "[model_providers.deepseek]\n"
+            'experimental_bearer_token = "sk-deepseek"\n',
+            encoding="utf-8",
+        )
+        lift_codex_config_provider(provider_config)
+        self.assertNotIn("model_catalog_json", provider_config.read_text(encoding="utf-8"))
+
+        official_config = self.auth_path.parent / "official.toml"
+        official_config.write_text(
+            'model = "gpt-5.6-codex"\n'
+            'model_catalog_json = "/tmp/legacy.json"\n',
+            encoding="utf-8",
+        )
+        lift_codex_config_provider(official_config)
+        official_text = official_config.read_text(encoding="utf-8")
+        self.assertNotIn("model_catalog_json", official_text)
+        self.assertIn('model = "gpt-5.6-codex"', official_text)
+
 
 if __name__ == "__main__":
     unittest.main()
