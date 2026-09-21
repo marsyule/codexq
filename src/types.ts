@@ -95,4 +95,63 @@ export interface WarmupAppSettings {
 
 export type ToastPayload = string | { key: string; params?: Record<string, any> };
 
+export interface ProviderData {
+  id: string;
+  name: string;
+  base_url: string;
+  wire_api: string;
+  active_model: string;
+  models: string[];
+  context_window?: number;
+  model_context_windows?: Record<string, number>;
+  notes: string | null;
+  custom_config_toml?: string | null;
+  custom_auth_json?: string | null;
+  key_masked: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConnectivityResult {
+  success: boolean;
+  status_code?: number;
+  latency_ms?: number;
+  message: string;
+  available_models: string[];
+}
+
+export type ActiveRuntimeMode =
+  | {
+      mode: 'official';
+      identity_key?: string | null;
+      email?: string | null;
+      plan?: string | null;
+      display_name?: string | null;
+    }
+  | {
+      mode: 'provider';
+      provider_id: string;
+      name: string;
+      active_model: string;
+      base_url: string;
+      models: string[];
+    };
+
+/**
+ * Formats a context window token count into human-readable notation (e.g. 256K, 1M).
+ * Clamps to a minimum of 256,000 tokens.
+ */
+export function formatContextWindow(tokens?: number | null): string {
+  const val = Math.max(256_000, tokens ?? 256_000);
+  if (val >= 1_000_000) {
+    const m = val / 1_000_000;
+    return Number.isInteger(m) ? `${m}M` : `${m.toFixed(1)}M`;
+  }
+  if (val >= 1_000) {
+    const k = val / 1_000;
+    return Number.isInteger(k) ? `${k}K` : `${k.toFixed(1)}K`;
+  }
+  return `${val}`;
+}
+
 

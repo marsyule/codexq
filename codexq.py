@@ -479,6 +479,355 @@ def ensure_profile_config(profile_dir: Path) -> None:
         atomic_write(config, text.encode("utf-8"), mode=0o600)
 
 
+def mask_api_key(key: str) -> str:
+    """Mask an API key for safe UI and log display while retaining identifiable edges.
+
+    Args:
+        key: The plaintext API key.
+
+    Returns:
+        A masked string representation of the key.
+    """
+    trimmed = key.strip()
+    if not trimmed:
+        return ""
+    if len(trimmed) <= 8:
+        return "****"
+    prefix = trimmed[:5] if trimmed.startswith("sk-") and len(trimmed) > 10 else trimmed[:3]
+    suffix = trimmed[-4:]
+    return f"{prefix}****{suffix}"
+
+
+DEFAULT_MIN_CONTEXT_WINDOW = 256_000
+
+
+def generate_model_catalog(
+    provider_dir: Path,
+    provider_id: str,
+    models: list[str],
+    context_window: int | None = None,
+    model_context_windows: dict[str, int] | None = None,
+    codex_home: Path | None = None,
+) -> Path:
+    """Generate models.json in provider sandbox directory for Codex CLI integration.
+
+    Context window defaults to at least 256k (256,000 tokens) if not explicitly set.
+
+    Args:
+        provider_dir: Path to the provider directory under ~/.codexq/providers/<id>.
+        provider_id: Unique slug identifier for the provider.
+        models: List of model identifiers supported by the provider.
+        context_window: Provider-level context window setting (minimum 256,000).
+        model_context_windows: Optional mapping of per-model context window overrides.
+        codex_home: Codex home directory used to resolve the host catalog mirror.
+            Defaults to ``~/.codex``. Callers with a custom/portable auth path must
+            pass the matching directory so the mirror lands next to ``config.toml``.
+
+    Returns:
+        Path to the generated models.json file.
+    """
+    provider_dir.mkdir(parents=True, exist_ok=True)
+    model_contexts = model_context_windows or {}
+    resolved_contexts = {
+        m: max(
+            DEFAULT_MIN_CONTEXT_WINDOW,
+            model_contexts.get(m, context_window or DEFAULT_MIN_CONTEXT_WINDOW),
+        )
+        for m in models
+    }
+    catalog = {
+        "models": [
+            {
+                "slug": m,
+                "display_name": m,
+                "description": m,
+                "default_reasoning_level": "medium",
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Fast responses with lighter reasoning"},
+                    {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
+                    {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+                    {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
+                ],
+                "shell_type": "shell_command",
+                "visibility": "list",
+                "supported_in_api": True,
+                "priority": 1000 + idx,
+                "additional_speed_tiers": [],
+                "availability_nux": None,
+                "upgrade": None,
+                "base_instructions": "You are Codex, an AI coding assistant.",
+                "model_messages": None,
+                "supports_reasoning_summaries": True,
+                "default_reasoning_summary": "none",
+                "support_verbosity": True,
+                "default_verbosity": "low",
+                "apply_patch_tool_type": "freeform",
+                "web_search_tool_type": "text_and_image",
+                "truncation_policy": {"mode": "tokens", "limit": 10000},
+                "supports_parallel_tool_calls": True,
+                "supports_image_detail_original": True,
+                "context_window": resolved_contexts[m],
+                "max_context_window": resolved_contexts[m],
+                "effective_context_window_percent": 95,
+                "experimental_supported_tools": [],
+                "input_modalities": ["text", "image"],
+                "supports_search_tool": True,
+                # Auto-compaction triggers at 85% of the configured working window,
+                # tighter than Codex's 90% default, to keep active context clean.
+                "auto_compact_token_limit": resolved_contexts[m] * 85 // 100,
+                "use_responses_lite": False,
+                "service_tiers": [],
+            }
+            for idx, m in enumerate(models)
+        ]
+    }
+    json_bytes = json.dumps(catalog, indent=2, ensure_ascii=False).encode("utf-8")
+    catalog_path = provider_dir / "models.json"
+    atomic_write(catalog_path, json_bytes, mode=0o600)
+
+    # Also sync <codex_home>/model-catalogs/codexq-<provider_id>.json
+    host_base = codex_home if codex_home is not None else DEFAULT_AUTH_PATH.parent
+    host_catalogs_dir = host_base / "model-catalogs"
+    host_catalogs_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write(host_catalogs_dir / f"codexq-{provider_id}.json", json_bytes, mode=0o600)
+
+    return catalog_path
+
+
+def update_codex_config_for_provider(
+    config_path: Path,
+    provider_id: str,
+    name: str,
+    base_url: str,
+    wire_api: str,
+    api_key: str,
+    active_model: str,
+    catalog_path: Path | None = None,
+    custom_config_toml: str | None = None,
+) -> None:
+    """Update ~/.codex/config.toml to activate a third-party provider while preserving user settings.
+
+    Args:
+        config_path: Path to host config.toml file.
+        provider_id: Unique slug identifier of the provider.
+        name: Human-readable display name of the provider.
+        base_url: HTTP endpoint base URL.
+        wire_api: Wire protocol format (default: 'responses').
+        api_key: Plaintext API key for bearer authentication.
+        active_model: Model name to set as default.
+        custom_config_toml: Optional custom TOML snippet to merge instead of standard provider table.
+    """
+    content = ""
+    if config_path.exists():
+        try:
+            content = config_path.read_text(encoding="utf-8")
+        except OSError:
+            content = ""
+
+    lines = content.splitlines(keepends=True)
+    out_lines: list[str] = []
+    in_target_table = False
+    passed_top_level = False
+    top_inserted = False
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if stripped.startswith("["):
+            passed_top_level = True
+            if not top_inserted:
+                out_lines.append(f'model = "{active_model}"\n')
+                out_lines.append(f'model_provider = "{provider_id}"\n')
+                top_inserted = True
+
+            target_header = f"[model_providers.{provider_id}]"
+            if stripped == target_header:
+                in_target_table = True
+                i += 1
+                continue
+            else:
+                in_target_table = False
+
+        if in_target_table:
+            i += 1
+            continue
+
+        if not passed_top_level:
+            if (
+                stripped.startswith("model =")
+                or stripped.startswith("model=")
+                or stripped.startswith("model_provider =")
+                or stripped.startswith("model_provider=")
+                or stripped.startswith("model_catalog_json =")
+                or stripped.startswith("model_catalog_json=")
+            ):
+                i += 1
+                continue
+
+        out_lines.append(line)
+        i += 1
+
+    if not top_inserted:
+        if out_lines and not out_lines[-1].endswith("\n"):
+            out_lines.append("\n")
+        out_lines.append(f'model = "{active_model}"\n')
+        out_lines.append(f'model_provider = "{provider_id}"\n')
+
+    if out_lines and not out_lines[-1].endswith("\n"):
+        out_lines.append("\n")
+
+    if custom_config_toml and custom_config_toml.strip():
+        out_lines.append(f"\n{custom_config_toml.strip()}\n")
+    else:
+        out_lines.append(f"\n[model_providers.{provider_id}]\n")
+        out_lines.append(f'name = "{name}"\n')
+        out_lines.append(f'base_url = "{base_url}"\n')
+        out_lines.append(f'wire_api = "{wire_api}"\n')
+        out_lines.append(f'experimental_bearer_token = "{api_key}"\n')
+
+    atomic_write(config_path, "".join(out_lines).encode("utf-8"), mode=0o600)
+
+
+def lift_codex_config_provider(config_path: Path) -> None:
+    """Remove third-party provider overrides from ~/.codex/config.toml to restore official routing.
+
+    Args:
+        config_path: Path to host config.toml file.
+    """
+    if not config_path.exists():
+        return
+    try:
+        content = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+
+    lines = content.splitlines(keepends=True)
+    out_lines: list[str] = []
+    passed_top_level = False
+    changed = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            passed_top_level = True
+
+        if not passed_top_level:
+            if (
+                stripped.startswith("model =")
+                or stripped.startswith("model=")
+                or stripped.startswith("model_provider =")
+                or stripped.startswith("model_provider=")
+                or stripped.startswith("model_catalog_json =")
+                or stripped.startswith("model_catalog_json=")
+            ):
+                changed = True
+                continue
+        out_lines.append(line)
+
+    if changed:
+        atomic_write(config_path, "".join(out_lines).encode("utf-8"), mode=0o600)
+
+
+def read_codex_config_active_provider(config_path: Path) -> tuple[str | None, str | None]:
+    """Read ~/.codex/config.toml to detect active model_provider and model if configured.
+
+    Args:
+        config_path: Path to host config.toml file.
+
+    Returns:
+        A tuple of (model_provider, model), either of which may be None.
+    """
+    if not config_path.exists():
+        return None, None
+    try:
+        content = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return None, None
+
+    active_provider: str | None = None
+    active_model: str | None = None
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            break
+        if stripped.startswith("model_provider"):
+            parts = stripped.split("=", 1)
+            if len(parts) == 2:
+                active_provider = parts[1].strip().strip('"').strip("'")
+        elif stripped.startswith("model") and not stripped.startswith("model_"):
+            parts = stripped.split("=", 1)
+            if len(parts) == 2:
+                active_model = parts[1].strip().strip('"').strip("'")
+
+    return (active_provider if active_provider else None, active_model if active_model else None)
+
+
+def test_provider_connectivity(base_url: str, api_key: str | None = None) -> dict[str, Any]:
+    """Test connectivity to a provider's models endpoint and extract model slugs.
+
+    Args:
+        base_url: The API base URL to test.
+        api_key: Optional API key for bearer authorization.
+
+    Returns:
+        A dictionary containing success, latency_ms, status_code, available_models, and message.
+    """
+    clean_url = base_url.rstrip("/")
+    models_url = f"{clean_url}/models" if not clean_url.endswith("/models") else clean_url
+
+    req = urllib.request.Request(models_url)
+    req.add_header("User-Agent", "CodexQ/1.0")
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+
+    start_time = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            latency_ms = int((time.time() - start_time) * 1000)
+            status_code = resp.status
+            body = resp.read().decode("utf-8")
+            data = json.loads(body)
+
+            models: list[str] = []
+            if isinstance(data, dict):
+                raw_list = data.get("data")
+                if isinstance(raw_list, list):
+                    for item in raw_list:
+                        if isinstance(item, dict) and "id" in item:
+                            models.append(str(item["id"]))
+                        elif isinstance(item, str):
+                            models.append(item)
+
+            return {
+                "success": True,
+                "latency_ms": latency_ms,
+                "status_code": status_code,
+                "available_models": sorted(models),
+                "message": f"HTTP {status_code} OK",
+            }
+    except urllib.error.HTTPError as exc:
+        latency_ms = int((time.time() - start_time) * 1000)
+        return {
+            "success": False,
+            "latency_ms": latency_ms,
+            "status_code": exc.code,
+            "available_models": [],
+            "message": f"HTTP {exc.code}: {exc.reason}",
+        }
+    except Exception as exc:
+        latency_ms = int((time.time() - start_time) * 1000)
+        return {
+            "success": False,
+            "latency_ms": latency_ms,
+            "status_code": 0,
+            "available_models": [],
+            "message": str(exc),
+        }
+
+
 def colorize(text: str, code: str, enabled: bool = True) -> str:
     if not enabled:
         return text
@@ -522,13 +871,19 @@ class Store:
         self.config_path = data_dir / "config.json"
         self.profiles_dir = data_dir / "profiles"
         self.trash_dir = data_dir / "trash"
+        self.providers_dir = data_dir / "providers"
+        self.backups_dir = data_dir / "backups"
         data_dir.mkdir(parents=True, exist_ok=True)
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
         self.trash_dir.mkdir(parents=True, exist_ok=True)
+        self.providers_dir.mkdir(parents=True, exist_ok=True)
+        self.backups_dir.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(data_dir, 0o700)
             os.chmod(self.profiles_dir, 0o700)
             os.chmod(self.trash_dir, 0o700)
+            os.chmod(self.providers_dir, 0o700)
+            os.chmod(self.backups_dir, 0o700)
         except OSError:
             pass
         self._load_config()
@@ -634,6 +989,24 @@ class Store:
                     FOREIGN KEY(identity_key) REFERENCES accounts(identity_key) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS providers (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    wire_api TEXT NOT NULL DEFAULT 'responses',
+                    active_model TEXT NOT NULL,
+                    models_json TEXT NOT NULL DEFAULT '[]',
+                    context_window INTEGER DEFAULT 256000,
+                    model_context_windows TEXT DEFAULT '{}',
+                    notes TEXT,
+                    custom_config_toml TEXT,
+                    custom_auth_json TEXT,
+                    key_masked TEXT NOT NULL DEFAULT '',
+                    key_sha256 TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_account_alarms_identity
                     ON account_alarms(identity_key);
                 """
@@ -644,6 +1017,30 @@ class Store:
                 pass
             try:
                 con.execute("ALTER TABLE removed_accounts ADD COLUMN display_name TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                con.execute("ALTER TABLE providers ADD COLUMN custom_config_toml TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                con.execute("ALTER TABLE providers ADD COLUMN custom_auth_json TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                con.execute("ALTER TABLE providers ADD COLUMN context_window INTEGER DEFAULT 256000")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                con.execute("ALTER TABLE providers ADD COLUMN model_context_windows TEXT DEFAULT '{}'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                con.execute("ALTER TABLE providers ADD COLUMN key_masked TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                con.execute("ALTER TABLE providers ADD COLUMN key_sha256 TEXT NOT NULL DEFAULT ''")
             except sqlite3.OperationalError:
                 pass
 
@@ -944,7 +1341,7 @@ class Store:
             auth_file_to_ingest = trash_auth
         else:
             # Fallback: check if ~/.codex/backups has matching credentials
-            backup_dir = Path.home() / ".codex" / "backups"
+            backup_dir = self.auth_path.parent / "backups"
             if backup_dir.exists():
                 for cand in backup_dir.glob("*/auth.json"):
                     try:
@@ -999,6 +1396,229 @@ class Store:
                     if item.is_dir():
                         shutil.rmtree(item, ignore_errors=True)
             return count
+
+    def list_providers(self) -> list[dict[str, Any]]:
+        """List all configured third-party model providers.
+
+        Returns:
+            A list of provider dictionaries with masked API keys.
+        """
+        with self.connect() as con:
+            rows = con.execute("SELECT * FROM providers ORDER BY created_at ASC").fetchall()
+        result: list[dict[str, Any]] = []
+        for r in rows:
+            p_id = r["id"]
+            key = self.read_provider_key(p_id) or ""
+            try:
+                models = json.loads(r["models_json"])
+            except Exception:
+                models = []
+            ctx = r["context_window"] if "context_window" in r.keys() and r["context_window"] else DEFAULT_MIN_CONTEXT_WINDOW
+            model_ctx = {}
+            if "model_context_windows" in r.keys() and r["model_context_windows"]:
+                try:
+                    model_ctx = json.loads(r["model_context_windows"])
+                except Exception:
+                    pass
+            result.append({
+                "id": p_id,
+                "name": r["name"],
+                "base_url": r["base_url"],
+                "wire_api": r["wire_api"],
+                "active_model": r["active_model"],
+                "models": models,
+                "context_window": max(DEFAULT_MIN_CONTEXT_WINDOW, ctx),
+                "model_context_windows": model_ctx,
+                "notes": r["notes"],
+                "custom_config_toml": r["custom_config_toml"] if "custom_config_toml" in r.keys() else None,
+                "custom_auth_json": r["custom_auth_json"] if "custom_auth_json" in r.keys() else None,
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+                "key_masked": mask_api_key(key) if key else "",
+            })
+        return result
+
+    def get_provider(self, target: str) -> dict[str, Any] | None:
+        """Retrieve a specific third-party provider by ID or display name.
+
+        Args:
+            target: Provider ID or name.
+
+        Returns:
+            The provider dictionary with masked API key, or None if not found.
+        """
+        target_clean = target.strip()
+        with self.connect() as con:
+            row = con.execute(
+                "SELECT * FROM providers WHERE id = ? OR LOWER(name) = LOWER(?)",
+                (target_clean, target_clean),
+            ).fetchone()
+        if not row:
+            return None
+        p_id = row["id"]
+        key = self.read_provider_key(p_id) or ""
+        try:
+            models = json.loads(row["models_json"])
+        except Exception:
+            models = []
+        ctx = row["context_window"] if "context_window" in row.keys() and row["context_window"] else DEFAULT_MIN_CONTEXT_WINDOW
+        model_ctx = {}
+        if "model_context_windows" in row.keys() and row["model_context_windows"]:
+            try:
+                model_ctx = json.loads(row["model_context_windows"])
+            except Exception:
+                pass
+        return {
+            "id": p_id,
+            "name": row["name"],
+            "base_url": row["base_url"],
+            "wire_api": row["wire_api"],
+            "active_model": row["active_model"],
+            "models": models,
+            "context_window": max(DEFAULT_MIN_CONTEXT_WINDOW, ctx),
+            "model_context_windows": model_ctx,
+            "notes": row["notes"],
+            "custom_config_toml": row["custom_config_toml"] if "custom_config_toml" in row.keys() else None,
+            "custom_auth_json": row["custom_auth_json"] if "custom_auth_json" in row.keys() else None,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "key_masked": mask_api_key(key) if key else "",
+        }
+
+    def read_provider_key(self, provider_id: str) -> str | None:
+        """Read the stored plaintext API key for a provider from its sandbox.
+
+        Args:
+            provider_id: Unique provider ID.
+
+        Returns:
+            The plaintext API key string, or None if file does not exist.
+        """
+        key_file = self.providers_dir / provider_id / "key"
+        if not key_file.is_file():
+            return None
+        try:
+            return key_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+
+    def save_provider_key(self, provider_id: str, api_key: str) -> None:
+        """Save a provider's plaintext API key to its isolated sandbox file with 0600 permissions.
+
+        Args:
+            provider_id: Unique provider ID.
+            api_key: The plaintext API key.
+        """
+        p_dir = self.providers_dir / provider_id
+        p_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(p_dir, 0o700)
+        except OSError:
+            pass
+        key_file = p_dir / "key"
+        atomic_write(key_file, api_key.strip().encode("utf-8"), mode=0o600)
+
+    def upsert_provider(
+        self,
+        name: str,
+        base_url: str,
+        active_model: str,
+        models: list[str],
+        api_key: str | None = None,
+        provider_id: str | None = None,
+        wire_api: str = "responses",
+        notes: str | None = None,
+        custom_config_toml: str | None = None,
+        custom_auth_json: str | None = None,
+        context_window: int | None = None,
+        model_context_windows: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        """Insert or update a third-party provider configuration.
+
+        Args:
+            name: Display name of the provider.
+            base_url: HTTP endpoint base URL.
+            active_model: Currently selected default model.
+            models: List of available model identifiers.
+            api_key: Optional API key. If provided, updates the sandbox key file.
+            provider_id: Optional custom provider ID; defaults to normalized name.
+            wire_api: Wire protocol format (default: 'responses').
+            notes: Optional user notes or description.
+            custom_config_toml: Optional custom TOML configuration to inject.
+            custom_auth_json: Optional custom auth.json payload to write.
+            context_window: Optional default context window length (minimum 256k).
+            model_context_windows: Optional mapping of model slug to context window.
+
+        Returns:
+            The saved provider dictionary.
+        """
+        p_id = provider_id or re.sub(r"[^a-zA-Z0-9_-]", "_", name.lower().strip())
+        now = utc_now_iso()
+        models_json = json.dumps(models, ensure_ascii=False)
+        ctx_val = max(DEFAULT_MIN_CONTEXT_WINDOW, context_window or DEFAULT_MIN_CONTEXT_WINDOW)
+        model_ctx_json = json.dumps(model_context_windows or {}, ensure_ascii=False)
+
+        with self.connect() as con:
+            existing = con.execute(
+                "SELECT id, created_at, key_masked, key_sha256 FROM providers WHERE id = ?",
+                (p_id,),
+            ).fetchone()
+
+            if api_key:
+                key_masked = mask_api_key(api_key)
+                key_sha256 = hashlib.sha256(api_key.strip().encode("utf-8")).hexdigest()
+            elif existing:
+                key_masked = existing["key_masked"] or ""
+                key_sha256 = existing["key_sha256"] or ""
+            else:
+                key_masked = ""
+                key_sha256 = ""
+
+            if existing:
+                con.execute(
+                    """
+                    UPDATE providers
+                    SET name = ?, base_url = ?, wire_api = ?, active_model = ?, models_json = ?,
+                        context_window = ?, model_context_windows = ?, notes = ?,
+                        custom_config_toml = ?, custom_auth_json = ?,
+                        key_masked = ?, key_sha256 = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (name, base_url, wire_api, active_model, models_json, ctx_val, model_ctx_json, notes, custom_config_toml, custom_auth_json, key_masked, key_sha256, now, p_id),
+                )
+            else:
+                con.execute(
+                    """
+                    INSERT INTO providers (id, name, base_url, wire_api, active_model, models_json, context_window, model_context_windows, notes, custom_config_toml, custom_auth_json, key_masked, key_sha256, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (p_id, name, base_url, wire_api, active_model, models_json, ctx_val, model_ctx_json, notes, custom_config_toml, custom_auth_json, key_masked, key_sha256, now, now),
+                )
+
+        if api_key:
+            self.save_provider_key(p_id, api_key)
+
+        return self.get_provider(p_id)  # type: ignore
+
+    def delete_provider(self, target: str) -> bool:
+        """Delete a configured provider and remove its sandboxed key and catalog files.
+
+        Args:
+            target: Provider ID or name.
+
+        Returns:
+            True if provider was found and deleted, False otherwise.
+        """
+        prov = self.get_provider(target)
+        if not prov:
+            return False
+        p_id = prov["id"]
+        with self.connect() as con:
+            con.execute("DELETE FROM providers WHERE id = ?", (p_id,))
+        p_dir = self.providers_dir / p_id
+        if p_dir.exists():
+            shutil.rmtree(p_dir, ignore_errors=True)
+        return True
 
     def mark_status(self, identity_key: str, status: str, error: str | None = None) -> None:
         with self.connect() as con:
@@ -2384,12 +3004,147 @@ class CodexQ:
         dest = dest_auth_path or self.auth_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(dest, profile_auth.read_bytes(), mode=0o600)
+
+        # Restore config.toml: remove model_provider and model_catalog_json to ensure official routing
+        config_path = (dest_auth_path.parent if dest_auth_path else self.auth_path.parent) / "config.toml"
+        lift_codex_config_provider(config_path)
+
         label = get_account_display_name(row)
         msg = f"Switched active Codex account to: {label}"
         if restart:
             r_ok, r_msg = self.restart_codex(relaunch=True)
             msg += f" ({r_msg})"
         return True, msg
+
+    def switch_to_provider(
+        self,
+        target: str,
+        model_override: str | None = None,
+        restart: bool = False,
+    ) -> tuple[bool, str]:
+        """Switch active runtime slot to a third-party model provider.
+
+        Args:
+            target: Provider ID or display name.
+            model_override: Optional model identifier to activate.
+            restart: Whether to restart Codex after switching.
+
+        Returns:
+            A tuple of (success, message).
+        """
+        prov = self.store.get_provider(target)
+        if not prov:
+            return False, f"Provider '{target}' not found."
+
+        p_id = prov["id"]
+        api_key = self.store.read_provider_key(p_id)
+        if not api_key:
+            return False, f"API key for provider '{prov['name']}' is missing or unreadable."
+
+        chosen_model = (
+            model_override
+            or prov["active_model"]
+            or (prov["models"][0] if prov["models"] else "default")
+        ).strip()
+
+        if chosen_model != prov["active_model"]:
+            with self.store.connect() as con:
+                con.execute(
+                    "UPDATE providers SET active_model = ?, updated_at = ? WHERE id = ?",
+                    (chosen_model, utc_now_iso(), p_id),
+                )
+
+        # 1. Sync current credentials before mutating
+        self.auto_sync_current(silent=True)
+
+        # 2. Generate model catalog
+        catalog_path = generate_model_catalog(
+            self.store.providers_dir / p_id,
+            p_id,
+            prov["models"] or [chosen_model],
+            context_window=prov.get("context_window"),
+            model_context_windows=prov.get("model_context_windows"),
+            codex_home=self.auth_path.parent,
+        )
+
+        # 3. Update ~/.codex/config.toml
+        config_path = self.auth_path.parent / "config.toml"
+        update_codex_config_for_provider(
+            config_path=config_path,
+            provider_id=p_id,
+            name=prov["name"],
+            base_url=prov["base_url"],
+            wire_api=prov.get("wire_api", "responses"),
+            api_key=api_key,
+            active_model=chosen_model,
+            custom_config_toml=prov.get("custom_config_toml"),
+        )
+
+        # 4. Only write auth.json when an explicit custom payload is configured.
+        # Otherwise the official credentials are left untouched (lossless); provider
+        # authentication flows through `experimental_bearer_token` in config.toml.
+        custom_auth = prov.get("custom_auth_json")
+        if custom_auth and custom_auth.strip():
+            try:
+                json.loads(custom_auth)
+                self.auth_path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write(self.auth_path, custom_auth.strip().encode("utf-8"), mode=0o600)
+            except Exception:
+                pass
+
+        msg = f"Switched active provider to '{prov['name']}' (model: {chosen_model})"
+        if restart:
+            r_ok, r_msg = self.restart_codex(relaunch=True)
+            msg += f" ({r_msg})"
+        return True, msg
+
+    def get_active_runtime_mode(self) -> dict[str, Any]:
+        """Detect the currently active runtime slot mode (official vs provider).
+
+        Returns:
+            A dictionary describing the active runtime mode.
+        """
+        config_path = self.auth_path.parent / "config.toml"
+        p_id, active_model = read_codex_config_active_provider(config_path)
+        # The built-in `openai` provider id represents official routing, not a third-party provider.
+        if p_id and p_id.strip().lower() != "openai":
+            prov = self.store.get_provider(p_id)
+            if prov:
+                return {
+                    "mode": "provider",
+                    "provider_id": prov["id"],
+                    "name": prov["name"],
+                    "active_model": active_model or prov["active_model"],
+                    "base_url": prov["base_url"],
+                    "models": prov["models"],
+                }
+            return {
+                "mode": "provider",
+                "provider_id": p_id,
+                "name": p_id,
+                "active_model": active_model or "",
+                "base_url": "",
+                "models": [],
+            }
+
+        current_key = self.get_current_identity_key()
+        if current_key:
+            row = self.store.resolve_account(current_key)
+            if row:
+                return {
+                    "mode": "official",
+                    "identity_key": row["identity_key"],
+                    "email": row["email"],
+                    "plan": row["plan"],
+                    "display_name": get_account_display_name(row),
+                }
+        return {
+            "mode": "official",
+            "identity_key": None,
+            "email": None,
+            "plan": None,
+            "display_name": None,
+        }
 
     def restart_codex(self, relaunch: bool = True, start_if_not_running: bool = True) -> tuple[bool, str]:
         """Terminates and optionally relaunches running Codex desktop apps and background daemons."""
@@ -2837,6 +3592,103 @@ def cmd_switch(args: argparse.Namespace, client: CodexQ) -> int:
         return 0
     print(f"[FAIL] {msg}", file=sys.stderr)
     return 1
+
+
+def cmd_provider(args: argparse.Namespace, client: CodexQ) -> int:
+    """Handle third-party provider subcommands (list, add, use, test, remove).
+
+    Args:
+        args: Parsed command-line arguments.
+        client: CodexQ controller instance.
+
+    Returns:
+        Exit code (0 for success, non-zero for failure).
+    """
+    action = args.provider_action
+    if action == "list":
+        provs = client.store.list_providers()
+        if getattr(args, "json", False):
+            print(json.dumps(provs, indent=2, ensure_ascii=False))
+            return 0
+        if not provs:
+            print("No third-party providers configured.")
+            print("Add one using: codexq provider add <name> --base-url <url> --key <key> --model <model>")
+            return 0
+        active_mode = client.get_active_runtime_mode()
+        active_id = active_mode.get("provider_id") if active_mode.get("mode") == "provider" else None
+        print(f"{'ACTIVE':<8} {'ID':<18} {'NAME':<20} {'ACTIVE MODEL':<22} {'BASE URL'}")
+        print("-" * 90)
+        for p in provs:
+            is_active = "*" if p["id"] == active_id else " "
+            print(f"{is_active:<8} {p['id']:<18} {p['name']:<20} {p['active_model']:<22} {p['base_url']}")
+        return 0
+
+    if action == "add":
+        models = [m.strip() for m in args.models.split(",") if m.strip()] if getattr(args, "models", None) else []
+        if args.model not in models:
+            models.insert(0, args.model)
+        prov = client.store.upsert_provider(
+            name=args.name,
+            base_url=args.base_url,
+            active_model=args.model,
+            models=models,
+            api_key=args.key,
+            wire_api=getattr(args, "wire_api", "responses") or "responses",
+            notes=getattr(args, "notes", None) or None,
+            context_window=getattr(args, "context_window", None),
+        )
+        print(f"[OK] Provider '{prov['name']}' (ID: {prov['id']}) saved successfully.")
+        if getattr(args, "switch", False):
+            ok, msg = client.switch_to_provider(prov["id"])
+            print(f"[{'OK' if ok else 'FAIL'}] {msg}")
+            return 0 if ok else 1
+        return 0
+
+    if action == "use":
+        ok, msg = client.switch_to_provider(args.target, model_override=getattr(args, "model", None), restart=getattr(args, "restart", False))
+        if ok:
+            print(f"[OK] {msg}")
+            return 0
+        print(f"[FAIL] {msg}", file=sys.stderr)
+        return 1
+
+    if action == "test":
+        res = test_provider_connectivity(args.base_url, api_key=getattr(args, "key", None) or None)
+        if getattr(args, "json", False):
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+            return 0 if res["success"] else 1
+        if res["success"]:
+            print(f"[OK] Connected in {res['latency_ms']}ms (HTTP {res['status_code']})")
+            if res["available_models"]:
+                print(f"Available models ({len(res['available_models'])}):")
+                for m in res["available_models"]:
+                    print(f"  - {m}")
+            else:
+                print("No models returned in /models payload.")
+            return 0
+        else:
+            print(f"[FAIL] {res['message']} ({res['latency_ms']}ms)", file=sys.stderr)
+            return 1
+
+    if action == "remove":
+        prov = client.store.get_provider(args.target)
+        if not prov:
+            print(f"[FAIL] Provider '{args.target}' not found.", file=sys.stderr)
+            return 1
+        if not getattr(args, "yes", False):
+            confirm = input(f"Are you sure you want to remove provider '{prov['name']}'? [y/N]: ").strip().lower()
+            if confirm not in ("y", "yes"):
+                print("Aborted.")
+                return 0
+        deleted = client.store.delete_provider(args.target)
+        if deleted:
+            print(f"[OK] Provider '{prov['name']}' removed.")
+            return 0
+        else:
+            print(f"[FAIL] Failed to remove provider '{args.target}'.", file=sys.stderr)
+            return 1
+
+    return 0
 
 
 def cmd_restart(args: argparse.Namespace, client: CodexQ) -> int:
@@ -3513,6 +4365,44 @@ async def cmd_rpc(args: argparse.Namespace, client: CodexQ) -> int:
                 force = bool(params.get("force", False))
                 warmup_timeout = float(params.get("timeout", 90.0))
                 result = await client.warmup(target=target, model=model, prompt=prompt, force=force, timeout=warmup_timeout)
+            elif method == "list_providers":
+                result = client.store.list_providers()
+            elif method == "get_provider":
+                target = str(params.get("id") or params.get("target") or "").strip()
+                result = client.store.get_provider(target)
+            elif method == "save_provider":
+                async with state_lock:
+                    payload = dict(params.get("payload") or params)
+                    result = client.store.upsert_provider(
+                        name=payload["name"],
+                        base_url=payload["base_url"],
+                        active_model=payload["active_model"],
+                        models=payload.get("models") or [],
+                        api_key=payload.get("api_key"),
+                        provider_id=payload.get("id"),
+                        wire_api=payload.get("wire_api", "responses"),
+                        notes=payload.get("notes"),
+                    )
+            elif method == "delete_provider":
+                async with state_lock:
+                    target = str(params.get("id") or params.get("target") or "").strip()
+                    ok = client.store.delete_provider(target)
+                    result = ok
+            elif method == "switch_to_provider":
+                async with state_lock:
+                    target = str(params.get("provider_id") or params.get("target") or "").strip()
+                    model_override = params.get("model_override")
+                    restart = bool(params.get("restart", False))
+                    ok, msg = client.switch_to_provider(target, model_override=model_override, restart=restart)
+                    if not ok:
+                        raise CodexQError(msg)
+                    result = msg
+            elif method == "get_active_runtime_mode":
+                result = client.get_active_runtime_mode()
+            elif method == "test_provider_connectivity":
+                base_url = str(params.get("base_url") or params.get("baseUrl") or "").strip()
+                api_key = params.get("api_key") or params.get("apiKey")
+                result = test_provider_connectivity(base_url, api_key=api_key or None)
             else:
                 raise CodexQError(f"Unknown method: {method}")
 
@@ -3700,6 +4590,49 @@ def build_parser() -> argparse.ArgumentParser:
     p_alarm.add_argument("--id", help="alarm id to remove or toggle")
     p_alarm.add_argument("--json", action="store_true", help="output alarms as JSON")
 
+    # provider
+    p_provider = sub.add_parser("provider", help="manage third-party model providers (OpenAI Responses compatible)")
+    p_provider_sub = p_provider.add_subparsers(dest="provider_action", required=True)
+
+    # provider list
+    p_prov_list = p_provider_sub.add_parser("list", help="list configured model providers")
+    p_prov_list.add_argument("--json", action="store_true", help="output as JSON")
+
+    # provider add
+    p_prov_add = p_provider_sub.add_parser("add", help="add or update a third-party provider")
+    p_prov_add.add_argument("name", help="provider display name (e.g. StepFun, DeepSeek)")
+    p_prov_add.add_argument("--base-url", required=True, help="API Base URL (e.g. https://api.stepfun.com/step_plan/v1)")
+    p_prov_add.add_argument("--key", required=True, help="provider API key")
+    p_prov_add.add_argument("--model", required=True, help="active/default model slug")
+    p_prov_add.add_argument("--models", help="comma-separated list of available model slugs")
+    p_prov_add.add_argument("--wire-api", default="responses", help="wire API format (default: responses)")
+    p_prov_add.add_argument("--notes", default="", help="optional notes/description")
+    p_prov_add.add_argument(
+        "--context-window",
+        type=int,
+        default=None,
+        dest="context_window",
+        help="working context window in tokens (minimum 256000, smaller values are clamped upward)",
+    )
+    p_prov_add.add_argument("--switch", action="store_true", help="switch to this provider immediately after adding")
+
+    # provider use
+    p_prov_use = p_provider_sub.add_parser("use", help="switch active runtime slot to a third-party provider")
+    p_prov_use.add_argument("target", help="provider id or name")
+    p_prov_use.add_argument("-m", "--model", default=None, help="override target model to use")
+    p_prov_use.add_argument("-r", "--restart", action="store_true", help="restart running Codex desktop app after switching")
+
+    # provider test
+    p_prov_test = p_provider_sub.add_parser("test", help="test connectivity to a provider endpoint and list models")
+    p_prov_test.add_argument("base_url", help="API Base URL to test")
+    p_prov_test.add_argument("--key", default="", help="API key for authentication (optional)")
+    p_prov_test.add_argument("--json", action="store_true", help="output test result as JSON")
+
+    # provider remove
+    p_prov_rm = p_provider_sub.add_parser("remove", help="remove a configured provider and delete its stored key")
+    p_prov_rm.add_argument("target", help="provider id or name")
+    p_prov_rm.add_argument("-y", "--yes", action="store_true", help="skip confirmation prompt")
+
     # serve
     p_serve = sub.add_parser("serve", help="run a local lightweight HTTP REST API daemon")
     p_serve.add_argument("--host", default="127.0.0.1", help="server bind host (default: 127.0.0.1)")
@@ -3730,6 +4663,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(cmd_refresh(args, client))
         if args.command == "switch":
             return cmd_switch(args, client)
+        if args.command == "provider":
+            return cmd_provider(args, client)
         if args.command == "restart":
             return cmd_restart(args, client)
         if args.command == "alias":

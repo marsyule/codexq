@@ -13,6 +13,7 @@ pub mod scheduler;
 pub mod switch;
 pub mod warmup;
 pub mod doctor;
+pub mod provider;
 
 #[cfg(test)]
 mod tests;

@@ -71,6 +71,12 @@ pub fn run() {
             commands::run_diagnostics,
             commands::get_account_rollover,
             commands::save_account_rollover,
+            commands::list_providers,
+            commands::save_provider,
+            commands::delete_provider,
+            commands::test_provider_connectivity,
+            commands::switch_to_provider,
+            commands::get_active_runtime_mode,
         ])
         .setup(|app| {
             // Ensure host ~/.codex/config.toml enforces cli_auth_credentials_store = "file"

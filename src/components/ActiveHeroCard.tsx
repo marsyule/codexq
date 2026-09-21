@@ -1,21 +1,80 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import type { AccountData } from '../types';
+import type { AccountData, ActiveRuntimeMode } from '../types';
 import { getQuotaStatus, getStatusColors, formatRelativeTime } from '../utils';
-import { Edit3, History, Zap, AlertCircle } from 'lucide-react';
+import { Edit3, History, Zap, AlertCircle, RotateCcw, Layers } from 'lucide-react';
 
 interface ActiveHeroCardProps {
-  account: AccountData;
-  onEditAlias: (acc: AccountData) => void;
-  onViewHistory: (acc: AccountData) => void;
+  account?: AccountData | null;
+  activeMode?: ActiveRuntimeMode | null;
+  onEditAlias?: (acc: AccountData) => void;
+  onViewHistory?: (acc: AccountData) => void;
+  onSwitchToOfficial?: () => void;
 }
 
 export const ActiveHeroCard: React.FC<ActiveHeroCardProps> = ({
   account,
+  activeMode,
   onEditAlias,
   onViewHistory,
+  onSwitchToOfficial,
 }) => {
   const { t } = useTranslation();
+
+  // If in Third-Party Provider Mode
+  if (activeMode && activeMode.mode === 'provider') {
+    return (
+      <div className="relative overflow-hidden rounded-xl border border-blue-200/90 bg-white p-3.5 shadow-xs transition-all hover:shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          {/* Left: Active Badge, Provider Name, Model, Base URL */}
+          <div className="flex flex-wrap items-center gap-3 min-w-0">
+            <div className="flex items-center gap-1.5 rounded-full bg-blue-50 border border-blue-200/80 px-2.5 py-0.5 shadow-2xs">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-600"></span>
+              </span>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700">
+                {t('providers.providerActiveBadge', 'Third-Party Provider Active')}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-bold tracking-tight text-slate-900 truncate">
+                {activeMode.name}
+              </span>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-mono bg-slate-100 border border-slate-200 text-slate-700">
+                <Layers className="w-3 h-3 text-blue-600" />
+                {activeMode.active_model}
+              </span>
+            </div>
+
+            {activeMode.base_url && (
+              <span className="text-xs text-slate-400 font-mono hidden md:inline truncate max-w-xs">
+                ({activeMode.base_url})
+              </span>
+            )}
+          </div>
+
+          {/* Right: Quick Switch to Official button */}
+          {onSwitchToOfficial && (
+            <button
+              onClick={onSwitchToOfficial}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100/80 border border-emerald-200/80 transition-all shadow-2xs active:scale-[0.98]"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-emerald-600" />
+              <span>{t('providers.switchBackToOfficial', 'Switch to Official Account')}</span>
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // If in Official Mode, but no official account found
+  if (!account) {
+    return null;
+  }
+
   const primaryStatus = getQuotaStatus(account.primary.remaining_percent);
   const primaryColors = getStatusColors(primaryStatus);
 
@@ -89,23 +148,27 @@ export const ActiveHeroCard: React.FC<ActiveHeroCardProps> = ({
 
         {/* Right: Compact Action Buttons */}
         <div className="flex items-center gap-1.5 shrink-0">
-          <button
-            onClick={() => onEditAlias(account)}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-slate-600 bg-slate-50 hover:bg-slate-100 hover:text-slate-900 border border-slate-200/70 transition-all shadow-2xs"
-            title={t('accounts.editAlias')}
-          >
-            <Edit3 className="w-3 h-3 text-slate-500" />
-            <span>{t('accounts.editAlias')}</span>
-          </button>
+          {onEditAlias && (
+            <button
+              onClick={() => onEditAlias(account)}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-slate-600 bg-slate-50 hover:bg-slate-100 hover:text-slate-900 border border-slate-200/70 transition-all shadow-2xs"
+              title={t('accounts.editAlias')}
+            >
+              <Edit3 className="w-3 h-3 text-slate-500" />
+              <span>{t('accounts.editAlias')}</span>
+            </button>
+          )}
 
-          <button
-            onClick={() => onViewHistory(account)}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-slate-600 bg-slate-50 hover:bg-slate-100 hover:text-slate-900 border border-slate-200/70 transition-all shadow-2xs"
-            title={t('accounts.viewHistory')}
-          >
-            <History className="w-3 h-3 text-slate-500" />
-            <span>{t('accounts.viewHistory')}</span>
-          </button>
+          {onViewHistory && (
+            <button
+              onClick={() => onViewHistory(account)}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-slate-600 bg-slate-50 hover:bg-slate-100 hover:text-slate-900 border border-slate-200/70 transition-all shadow-2xs"
+              title={t('accounts.viewHistory')}
+            >
+              <History className="w-3 h-3 text-slate-500" />
+              <span>{t('accounts.viewHistory')}</span>
+            </button>
+          )}
         </div>
       </div>
 

@@ -374,6 +374,126 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_provider_key_masking_and_catalog() {
+        use crate::core::provider::*;
+
+        assert_eq!(mask_api_key("sk-1234567890abcdef"), "sk-12****cdef");
+        assert_eq!(mask_api_key("short"), "****");
+        assert_eq!(mask_api_key(""), "");
+
+        let hash1 = hash_api_key("sk-test-key-1");
+        let hash2 = hash_api_key("sk-test-key-1");
+        let hash3 = hash_api_key("sk-test-key-2");
+        assert_eq!(hash1, hash2);
+        assert_ne!(hash1, hash3);
+
+        let mut model_contexts = std::collections::HashMap::new();
+        model_contexts.insert("deepseek-v4-flash".to_string(), 1_000_000);
+
+        // Build a full Codex model catalog conforming to Codex Desktop & CLI.
+        // `build_model_catalog` is pure, so this test never touches the real ~/.codex.
+        let cat_content = build_model_catalog(
+            "deepseek-v4-flash",
+            &["step-5-preview".to_string(), "deepseek-v4-flash".to_string()],
+            Some(512_000),
+            Some(&model_contexts),
+        );
+        assert_eq!(cat_content.models.len(), 2);
+        assert_eq!(cat_content.models[0].slug, "deepseek-v4-flash");
+        assert_eq!(cat_content.models[0].visibility, "list");
+        assert_eq!(cat_content.models[0].priority, 1000);
+        assert_eq!(cat_content.models[0].context_window, 1_000_000);
+        assert_eq!(cat_content.models[0].effective_context_window_percent, 95);
+        // Auto-compaction triggers at 85% of the working window.
+        assert_eq!(cat_content.models[0].auto_compact_token_limit, Some(850_000));
+        assert_eq!(cat_content.models[1].slug, "step-5-preview");
+        assert_eq!(cat_content.models[1].visibility, "list");
+        assert_eq!(cat_content.models[1].priority, 1001);
+        assert_eq!(cat_content.models[1].context_window, 512_000);
+        assert_eq!(cat_content.models[1].effective_context_window_percent, 95);
+        assert_eq!(cat_content.models[1].auto_compact_token_limit, Some(435_200));
+    }
+
+    #[test]
+    fn test_lossless_toml_editing_preserves_comments_and_mcp() {
+        use toml_edit::{DocumentMut, Item, Table, Value};
+
+        let initial_toml = r#"# User custom comment at top
+cli_auth_credentials_store = "file"
+
+[mcp_servers.my_tool]
+command = "node"
+args = ["server.js"]
+
+# Another important user comment
+[custom_section]
+feature_flag = true
+"#;
+
+        let mut doc: DocumentMut = initial_toml.parse().expect("Parse initial TOML");
+
+        // 1. Inject third-party provider
+        doc["model"] = Item::Value(Value::from("step-5-preview"));
+        doc["model_provider"] = Item::Value(Value::from("stepfun"));
+        doc["model_catalog_json"] = Item::Value(Value::from("/path/to/models.json"));
+
+        if !doc.contains_key("model_providers") {
+            doc["model_providers"] = Item::Table(Table::new());
+        }
+        let mut p_table = Table::new();
+        p_table["name"] = Item::Value(Value::from("StepFun"));
+        p_table["base_url"] = Item::Value(Value::from("https://api.stepfun.com/v1"));
+        p_table["wire_api"] = Item::Value(Value::from("responses"));
+        p_table["experimental_bearer_token"] = Item::Value(Value::from("sk-secret"));
+
+        if let Some(mp) = doc.get_mut("model_providers").and_then(|i| i.as_table_like_mut()) {
+            mp.insert("stepfun", Item::Table(p_table));
+        }
+
+        let modified_toml = doc.to_string();
+
+        // Verify that original comments, MCP settings, and flags are 100% preserved
+        assert!(modified_toml.contains("# User custom comment at top"));
+        assert!(modified_toml.contains("[mcp_servers.my_tool]"));
+        assert!(modified_toml.contains("# Another important user comment"));
+        assert!(modified_toml.contains("feature_flag = true"));
+        assert!(modified_toml.contains("model_provider = \"stepfun\""));
+        assert!(modified_toml.contains("[model_providers.stepfun]"));
+
+        // 2. Now switch back to official mode: remove model_provider and model_catalog_json
+        doc.remove("model_provider");
+        doc.remove("model_catalog_json");
+        doc.remove("model");
+
+        let restored_toml = doc.to_string();
+        assert!(!restored_toml.contains("model_provider ="));
+        assert!(!restored_toml.contains("model_catalog_json ="));
+        // Original comments and MCP server must STILL be intact!
+        assert!(restored_toml.contains("# User custom comment at top"));
+        assert!(restored_toml.contains("[mcp_servers.my_tool]"));
+        assert!(restored_toml.contains("feature_flag = true"));
+    }
+
+    #[test]
+    fn test_model_catalog_default_and_minimum_clamp() {
+        use crate::core::provider::*;
+
+        // 1. Without context window provided, default to 256k minimum (256,000 tokens)
+        let cat_content =
+            build_model_catalog("default-model", &["default-model".to_string()], None, None);
+        assert_eq!(cat_content.models[0].context_window, 256_000);
+        assert_eq!(cat_content.models[0].effective_context_window_percent, 95);
+        assert_eq!(cat_content.models[0].auto_compact_token_limit, Some(217_600));
+
+        // 2. If configured below 256k (e.g. 128k), clamp to 256k minimum
+        let cat_content2 =
+            build_model_catalog("small-model", &["small-model".to_string()], Some(128_000), None);
+        assert_eq!(cat_content2.models[0].context_window, 256_000);
+        assert_eq!(cat_content2.models[0].effective_context_window_percent, 95);
+        assert_eq!(cat_content2.models[0].auto_compact_token_limit, Some(217_600));
+    }
 }
 
 

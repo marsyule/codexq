@@ -21,6 +21,7 @@ CodexQ 采用**双轨工程架构**：
 - **定时触发与多闹钟错峰流水线**：单账号独立配置错峰预热闹钟（强校验 $\ge 5$ 小时防重叠），提前激活 5 小时额度窗口，支持「仅一次」模式。
 - **JIT 到期自感知刷新与通知**：配额到期精准自动唤醒刷新，满血复活时触发系统原生桌面通知。
 - **安全沙箱隔离**：各账号独立沙箱存储（强制 `cli_auth_credentials_store = "file"`），SQLite 严禁明文存储 Token。
+- **第三方模型服务商接入**：可接入任意兼容 OpenAI 规范的服务商（DeepSeek、StepFun、SiliconFlow、OpenRouter 等），支持模型池管理与单模型独立上下文长度（256K 保底，85% 自动压缩）。明文 Key 仅存于 `0600` 沙箱，`~/.codex/config.toml` 以 AST 级无损方式注入（保留注释与 MCP 配置），官方账号与第三方服务商共用同一个原子运行时槽位。
 - **纯标准库 Python CLI / SDK**：`codexq.py` 单文件免安装即用，提供完整 CLI、Python Async SDK、REST API 与 stdio JSON-RPC。
 
 ---
@@ -37,6 +38,12 @@ CodexQ 采用**双轨工程架构**：
 │   └── <profile-id>/         # 账号 profile_id（基于 identity_key 计算）
 │       ├── auth.json         # 账号独立凭据镜像（chmod 0600）
 │       └── config.toml       # 强制 cli_auth_credentials_store = "file"
+├── providers/                # 第三方服务商密钥沙箱与模型目录
+│   └── <provider-id>/
+│       ├── key               # 明文 API Key（chmod 0600，绝不写入 SQLite）
+│       └── models.json       # 生成的 Codex 模型目录产物
+├── backups/                  # 切换前运行时快照（auth.json + config.toml，最多 20 份）
+│   └── <YYYYMMDD_HHMMSS>_<reason>/
 └── trash/                    # 软删除回收站隔离目录
     └── <profile-id>/
 ```
@@ -180,6 +187,23 @@ python codexq.py history main --limit 20
 ```bash
 python codexq.py serve --port 8765
 python codexq.py rpc
+```
+
+### 12. 管理第三方模型服务商
+```bash
+# 添加一个兼容 OpenAI 规范的服务商（加 --switch 可在添加后立即切换）
+python codexq.py provider add DeepSeek \
+  --base-url https://api.deepseek.com/v1 \
+  --key sk-xxxx \
+  --model deepseek-chat \
+  --models deepseek-chat,deepseek-reasoner \
+  --context-window 256000
+
+# 列出 / 激活 / 连通性测试 / 删除
+python codexq.py provider list
+python codexq.py provider use deepseek -m deepseek-reasoner
+python codexq.py provider test https://api.deepseek.com/v1 --key sk-xxxx
+python codexq.py provider remove deepseek
 ```
 
 ---

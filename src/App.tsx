@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
-import type { AccountData, TrashAccountData, AutoRefreshSettings, ToastPayload } from './types';
+import type { AccountData, TrashAccountData, AutoRefreshSettings, ToastPayload, ProviderData, ActiveRuntimeMode } from './types';
 import { loadAutoRefreshSettings, saveAutoRefreshSettings } from './utils/settings';
 import { setAppLanguage } from './i18n';
 import { ActiveHeroCard } from './components/ActiveHeroCard';
@@ -16,6 +16,7 @@ import { SchedulerView } from './components/SchedulerView';
 import { TriggerSettingsCard } from './components/TriggerSettingsCard';
 import { AddAccountModal } from './components/AddAccountModal';
 import { DoctorCard } from './components/DoctorCard';
+import { ProvidersView } from './components/ProvidersView';
 import {
   RefreshCw,
   RotateCcw,
@@ -33,6 +34,7 @@ import {
   Globe,
   Info,
   Plus,
+  Server,
 } from 'lucide-react';
 
 /**
@@ -61,8 +63,12 @@ export function App() {
     type: 'success' | 'error' | 'info';
   } | null>(null);
   const toastTimerRef = useRef<any>(null);
-  const [currentTab, setCurrentTab] = useState<'accounts' | 'scheduler' | 'settings'>('accounts');
+  const [currentTab, setCurrentTab] = useState<'accounts' | 'providers' | 'scheduler' | 'settings'>('accounts');
   const [localePreference, setLocalePreference] = useState<string>('auto');
+
+  // Third-party providers & active mode states
+  const [providers, setProviders] = useState<ProviderData[]>([]);
+  const [activeMode, setActiveMode] = useState<ActiveRuntimeMode | null>(null);
 
   // Auto-refresh state & settings
   const [autoRefreshSettings, setAutoRefreshSettings] = useState<AutoRefreshSettings>(() => loadAutoRefreshSettings());
@@ -145,6 +151,26 @@ export function App() {
       setLoading(false);
     }
   }, [t]);
+
+  // Fetch third-party providers
+  const fetchProviders = useCallback(async () => {
+    try {
+      const res = await invoke<ProviderData[]>('list_providers');
+      setProviders(res);
+    } catch (err) {
+      console.warn('Failed to load providers:', err);
+    }
+  }, []);
+
+  // Fetch current active runtime mode (official vs provider)
+  const fetchActiveMode = useCallback(async () => {
+    try {
+      const res = await invoke<ActiveRuntimeMode>('get_active_runtime_mode');
+      setActiveMode(res);
+    } catch (err) {
+      console.warn('Failed to get active runtime mode:', err);
+    }
+  }, []);
 
   // Helper to update and persist auto-refresh settings
   const handleUpdateAutoRefreshSettings = (patch: Partial<AutoRefreshSettings>) => {
@@ -267,12 +293,49 @@ export function App() {
     try {
       await invoke('switch_account', { target: targetKey, restart: false });
       await fetchAccounts();
+      await fetchActiveMode();
       showToast({ key: 'toasts.switchSuccess', params: { name: targetAccount.display_name } });
       notify('CodexQ', t('toasts.switchSuccess', { name: targetAccount.display_name }));
     } catch (err: any) {
       setError(typeof err === 'string' ? err : err?.message || 'Failed to switch account');
     } finally {
       setSwitchingId(null);
+    }
+  };
+
+  // Switch active provider slot
+  const handleSwitchProvider = async (providerId: string, modelOverride?: string) => {
+    setError(null);
+    try {
+      const msg = await invoke<string>('switch_to_provider', {
+        providerId,
+        modelOverride: modelOverride || null,
+        restart: false,
+      });
+      await fetchActiveMode();
+      await fetchProviders();
+      await fetchAccounts();
+      showToast(msg || t('providers.switchedSuccess', 'Switched provider successfully'));
+      notify('CodexQ', t('providers.switchedSuccess', 'Switched provider successfully'));
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err?.message || 'Failed to switch provider');
+    }
+  };
+
+  // Delete a provider
+  const handleDeleteProvider = async (id: string) => {
+    await invoke('delete_provider', { id });
+    await fetchProviders();
+    await fetchActiveMode();
+  };
+
+  // Switch back to official account
+  const handleSwitchToOfficial = async () => {
+    if (accounts.length > 0) {
+      const target = accounts.find((a) => a.is_current) || accounts[0];
+      await handleSwitchAccount(target);
+    } else {
+      showToast(t('providers.noOfficialAccounts', 'No official accounts saved yet to switch to'), 'info');
     }
   };
 
@@ -382,6 +445,8 @@ export function App() {
     const init = async () => {
       await fetchAccounts();
       await fetchTrash();
+      await fetchProviders();
+      await fetchActiveMode();
       try {
         const remoteCfg = await invoke<Record<string, string>>('get_app_settings');
         if (remoteCfg && remoteCfg['auto_refresh.interval_minutes']) {
@@ -656,6 +721,18 @@ export function App() {
             </button>
 
             <button
+              onClick={() => setCurrentTab('providers')}
+              className={`flex items-center gap-2.5 w-full px-3 py-2 rounded-lg text-xs font-semibold transition-all ${
+                currentTab === 'providers'
+                  ? 'bg-blue-100/70 text-blue-700 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <Server className="w-3.5 h-3.5" />
+              <span>{t('nav.providers')}</span>
+            </button>
+
+            <button
               onClick={() => setCurrentTab('scheduler')}
               className={`flex items-center gap-2.5 w-full px-3 py-2 rounded-lg text-xs font-semibold transition-all ${
                 currentTab === 'scheduler'
@@ -710,11 +787,19 @@ export function App() {
             {/* View Title */}
             <div>
               <h2 className="text-base font-bold tracking-tight text-slate-900">
-                {currentTab === 'accounts' ? t('nav.accounts') : currentTab === 'scheduler' ? t('nav.scheduler') : t('nav.settings')}
+                {currentTab === 'accounts'
+                  ? t('nav.accounts')
+                  : currentTab === 'providers'
+                  ? t('nav.providers')
+                  : currentTab === 'scheduler'
+                  ? t('nav.scheduler')
+                  : t('nav.settings')}
               </h2>
               <p className="text-[11px] text-slate-500">
                 {currentTab === 'accounts'
                   ? t('app.header.accountsDesc')
+                  : currentTab === 'providers'
+                  ? t('app.header.providersDesc')
                   : currentTab === 'scheduler'
                   ? t('app.header.schedulerDesc')
                   : t('app.header.settingsDesc')}
@@ -814,7 +899,7 @@ export function App() {
           {/* Tab 1: Accounts Pool */}
           <div className={currentTab === 'accounts' ? 'space-y-3.5' : 'hidden'}>
             {/* Section 1: Active Account Hero Banner */}
-            {activeAccount ? (
+            {activeMode?.mode === 'provider' || activeAccount ? (
               <div>
                 <div className="flex items-center justify-between mb-1.5 px-0.5">
                   <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1">
@@ -829,8 +914,10 @@ export function App() {
                 </div>
                 <ActiveHeroCard
                   account={activeAccount}
+                  activeMode={activeMode}
                   onEditAlias={(acc) => setAliasAccount(acc)}
                   onViewHistory={(acc) => setHistoryAccount(acc)}
+                  onSwitchToOfficial={handleSwitchToOfficial}
                 />
               </div>
             ) : !loading && (
@@ -917,6 +1004,21 @@ export function App() {
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Tab: Third-Party Providers */}
+          <div className={currentTab === 'providers' ? 'space-y-4' : 'hidden'}>
+            <ProvidersView
+              providers={providers}
+              activeMode={activeMode}
+              onRefresh={async () => {
+                await fetchProviders();
+                await fetchActiveMode();
+              }}
+              onSwitchProvider={handleSwitchProvider}
+              onDeleteProvider={handleDeleteProvider}
+              showToast={showToast}
+            />
           </div>
 
           {/* Tab 2: Scheduled Trigger */}

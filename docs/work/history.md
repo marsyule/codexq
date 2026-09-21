@@ -177,3 +177,48 @@
   1. 扩展 `ToastPayload` 支持 `{ key: string; params?: Record<string, any> }` 结构。
   2. `toastMessage` 状态存储 i18n 键值，在 JSX 渲染阶段进行惰性求值 `{toastMessage.key ? t(...) : toastMessage.text}`。
   3. 切换语言时派发 `{ key: 'toasts.languageChanged' }`，实现即时与实时的自适应重绘。
+
+---
+
+## 15. 第三方服务商模式的测试隔离、跨端 schema 与 config 键回归修复
+
+- **决策时间**：v1.0.2 服务商功能评审修复期
+- **背景与问题**：
+  任务 19–21 引入第三方服务商接入后，全量代码评审暴露出三个阻断级问题：
+  1. Python `generate_model_catalog` 硬编码写 `Path.home()/".codex"`，导致单元测试污染真实主机配置目录（违反 AGENTS.md §4），并在 portable/自定义 auth_path 下将 catalog 落到错误位置。
+  2. Rust 与 Python 对同一个 `~/.codexq/codexq.db` 的 `providers` 表定义了互不兼容的 schema（Rust 有 `key_masked`/`key_sha256 NOT NULL`，Python 没有），先建表的一方会让另一方报 NOT NULL 或“列不存在”。
+  3. Rust `switch_to_provider` 与前端默认模板仍在写根级 `model_catalog_json`，与任务 20 记录的“导致 Codex CLI 致命配置解析错误”的结论相矛盾。
+- **根因剖析**：
+  1. 跨语言共用同一份 SQLite 数据库，但两侧各写各的 `CREATE TABLE`，缺少单一 schema 契约。
+  2. `model_catalog_json` 并非官方 Codex 支持的配置键；任务 20 已移除写入，但 Rust 与前端模板在后续改动中未被同步清理。
+  3. 路径解析在“沙箱/便携”场景下未统一走实例的 `auth_path.parent`。
+- **决策与方案**：
+  1. **路径即真理**：`generate_model_catalog` 增加 `codex_home` 形参，默认 `~/.codex`，所有调用方显式传入实例的 codex home；测试全部改为传入临时目录。
+  2. **schema 收敛**：Python 补齐 `key_masked`/`key_sha256` 列并写入；Rust 两列补 `DEFAULT ''` + ALTER 兜底；`upsert_provider` 在哈希为空时保留原值。新增 `db::get_provider_key_hash` 防止编辑时清空哈希。
+  3. **移除非法键**：三端停止写入根级 `model_catalog_json`，并在切换两个方向时主动清理残留；`switch_account` 改为仅在第三方 provider 时才移除 `model_provider`/`model` 与对应 provider 表。
+  4. **有界快照**：运行时备份保留上限 `MAX_RUNTIME_SNAPSHOTS = 20`，防止明文凭据备份无限增长。
+  5. **官方 id 识别**：`openai` 视为官方路由，避免误判第三方模式。
+  6. **自动压缩阈值定为 85%**：`auto_compact_token_limit = context_window × 0.85`（官方默认约 90%，留 `effective_context_window_percent = 95` 作 headroom）。理由：压缩点应落在「工作窗口」的 85% 而非物理窗口，避免 stale context 长期累积；CodexQ 中用户配置的 `context_window` 即声明的工作窗口。该键为绝对 token 数，随 `context_window` 动态重算，不会出现 relay 式写死值失同步。
+  7. **测试可测性**：抽取纯函数 `build_model_catalog`（无 I/O），Rust catalog 测试改为直接断言结构体，不再写入真实 `~/.codex`，与 Python 端隔离策略对齐。
+- **验证**：
+  - 隔离 `CODEX_HOME` 下 `codex-cli 0.149.1` 的 `codex doctor` 实测复现并确认：含根级 `model_catalog_json` → `config could not be loaded`；移除后配置正常加载。
+  - Rust 单元测试 15/15、`cargo check` 零警告、Python 单元测试 39/39（且不再写入真实 `~/.codex`）、`pnpm run build` 零错误。
+  - SQLite 双向插入/查询脚本验证 Rust 侧与 Python 侧表结构已互相兼容。
+
+---
+
+## 16. Current Truth 文档漂移与 CLI 契约落差修复
+
+- **决策时间**：v1.0.2 服务商功能评审修复期
+- **背景与问题**：
+  任务 19–22 引入并修复第三方服务商功能后，只更新了 `docs/work/current.md` 与 `docs/work/history.md`（工作日志），而两份 Current Truth 文档长期未动：`docs/architecture.md` 停留在 09-16、`docs/PROJECT.md` 停留在 09-14，均无任何 provider 相关内容。核查同时发现 `current.md` 声称的 `codexq provider add --context-window` 在 `build_parser` 中并未注册，且 `cmd_provider` 也没有把 `context_window` 传给 `upsert_provider`。
+- **根因剖析**：
+  1. 任务记录（work log）与事实文档（Current Truth）的更新责任被混为一谈：完成任务时写了 `current.md`，误以为「文档已更新」。
+  2. 声明式文档先于实现被写出（CLI 参数只写进任务清单，没有落到 `argparse`），缺少「文档声称的能力必须有机械测试兜底」的约束。
+- **决策与方案**：
+  1. **原位补齐**：按 `docs/index.md` §3 协议直接原位更新 `architecture.md`（架构图、目录、schema、命令列表、新增第 8 章）与 `PROJECT.md`（定位、功能规格、非目标澄清），严禁新建版本文件。
+  2. **契约回落为测试**：把「CLI 必须支持 `--context-window`」从文档文字转为 `tests/test_provider.py` 中的可执行断言，遵循 `docs/index.md` §3「可通过自动化验证的规则应沉淀至 tests/，而不仅停留在文字告诫」。
+  3. **文档卫生**：顺带修正 `architecture.md` §7.2 的语言包路径事实错误（`src/locales/` → `src/i18n/locales/`）。
+- **验证**：
+  - Python 单元测试 40/40 通过（原 39 + 新增 1）；
+  - 隔离断言：真实 `~/.codex/model-catalogs`（3 个文件）与 `~/.codexq` 未被测试写入。

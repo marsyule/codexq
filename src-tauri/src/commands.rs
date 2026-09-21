@@ -487,3 +487,186 @@ pub async fn save_account_rollover(
     Ok("Account rollover configuration saved".to_string())
 }
 
+/// Payload for creating or updating a third-party provider.
+#[derive(serde::Deserialize)]
+pub struct SaveProviderPayload {
+    pub id: Option<String>,
+    pub name: String,
+    pub base_url: String,
+    pub wire_api: Option<String>,
+    pub active_model: String,
+    pub models: Vec<String>,
+    pub context_window: Option<u64>,
+    pub model_context_windows: Option<std::collections::HashMap<String, u64>>,
+    pub notes: Option<String>,
+    pub custom_config_toml: Option<String>,
+    pub custom_auth_json: Option<String>,
+    pub api_key: Option<String>,
+}
+
+/// Lists all configured third-party providers.
+#[tauri::command]
+pub async fn list_providers() -> Result<Value, String> {
+    let providers = crate::core::db::list_providers()?;
+    serde_json::to_value(providers).map_err(|e| e.to_string())
+}
+
+/// Saves or updates a third-party provider and its secret API key.
+#[tauri::command]
+pub async fn save_provider(payload: SaveProviderPayload) -> Result<Value, String> {
+    let id = match payload.id {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => {
+            let slug = payload
+                .name
+                .trim()
+                .to_lowercase()
+                .replace(|c: char| !c.is_alphanumeric(), "-")
+                .trim_matches('-')
+                .to_string();
+            if slug.is_empty() {
+                format!("provider-{}", chrono::Utc::now().timestamp_millis())
+            } else {
+                // Never silently clobber an existing provider that slugifies to the same id.
+                let mut candidate = slug.clone();
+                let mut suffix = 2u32;
+                while crate::core::db::get_provider(&candidate)?.is_some() {
+                    candidate = format!("{slug}-{suffix}");
+                    suffix += 1;
+                }
+                candidate
+            }
+        }
+    };
+
+    let existing = crate::core::db::get_provider(&id)?;
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    let (key_masked, key_sha256) = match payload.api_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw_key) => {
+            crate::core::provider::save_provider_key(&id, raw_key)?;
+            (
+                crate::core::provider::mask_api_key(raw_key),
+                crate::core::provider::hash_api_key(raw_key),
+            )
+        }
+        None => match existing.as_ref() {
+            Some(ex) => (
+                ex.key_masked.clone(),
+                crate::core::db::get_provider_key_hash(&id)?.unwrap_or_default(),
+            ),
+            None => return Err("API key is required for new provider".to_string()),
+        },
+    };
+
+    let mut models = payload.models;
+    let active_model = payload.active_model.trim().to_string();
+    if !active_model.is_empty() && !models.contains(&active_model) {
+        models.insert(0, active_model.clone());
+    }
+
+    let provider = crate::core::provider::Provider {
+        id: id.clone(),
+        name: payload.name.trim().to_string(),
+        base_url: payload.base_url.trim().to_string(),
+        wire_api: payload.wire_api.unwrap_or_else(|| "responses".to_string()),
+        active_model,
+        models,
+        context_window: payload.context_window,
+        model_context_windows: payload.model_context_windows,
+        notes: payload.notes.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        custom_config_toml: payload.custom_config_toml.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        custom_auth_json: payload.custom_auth_json.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        key_masked,
+        created_at: existing.as_ref().map(|e| e.created_at.clone()).unwrap_or_else(|| now.clone()),
+        updated_at: now,
+    };
+
+    crate::core::db::upsert_provider(&provider, &key_sha256)?;
+
+    // Generate/refresh the provider model catalog artifact. It is deliberately NOT wired
+    // into config.toml via a root-level `model_catalog_json` key, which Codex CLI >= 0.149.1
+    // rejects as an undeclared config key.
+    let _ = crate::core::provider::generate_model_catalog(
+        &id,
+        &provider.active_model,
+        &provider.models,
+        provider.context_window,
+        provider.model_context_windows.as_ref(),
+    )?;
+
+    // If this provider is currently the active provider in ~/.codex/config.toml, sync config.toml
+    if let Ok(crate::core::switch::ActiveRuntimeMode::Provider { provider_id, .. }) =
+        crate::core::switch::get_active_runtime_mode()
+    {
+        if provider_id == id {
+            let host_config_path = crate::core::paths::codex_home().join("config.toml");
+            if host_config_path.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&host_config_path) {
+                    if let Ok(mut doc) = content.parse::<toml_edit::DocumentMut>() {
+                        doc.remove("model_catalog_json");
+                        doc["model"] =
+                            toml_edit::Item::Value(toml_edit::Value::from(provider.active_model.as_str()));
+                        let _ = crate::core::auth::atomic_write(&host_config_path, doc.to_string().as_bytes());
+                    }
+                }
+            }
+        }
+    }
+
+    serde_json::to_value(&provider).map_err(|e| e.to_string())
+}
+
+/// Deletes a third-party provider and purges its sandbox files.
+#[tauri::command]
+pub async fn delete_provider(id: String) -> Result<String, String> {
+    let ok = crate::core::db::delete_provider(&id)?;
+    if ok {
+        Ok(format!("Provider '{id}' deleted successfully"))
+    } else {
+        Err(format!("Provider '{id}' not found"))
+    }
+}
+
+/// Tests connectivity to an API endpoint and attempts to fetch its models list.
+#[tauri::command]
+pub async fn test_provider_connectivity(
+    base_url: String,
+    api_key: String,
+    provider_id: Option<String>,
+) -> Result<Value, String> {
+    let resolved_key = if api_key.trim().is_empty() {
+        if let Some(pid) = provider_id {
+            crate::core::provider::read_provider_key(&pid).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    } else {
+        api_key
+    };
+
+    let res = crate::core::provider::test_provider_connectivity(&base_url, &resolved_key).await;
+    serde_json::to_value(res).map_err(|e| e.to_string())
+}
+
+/// Switches the active runtime slot to a third-party model provider.
+#[tauri::command]
+pub async fn switch_to_provider(
+    provider_id: String,
+    model_override: Option<String>,
+    restart: Option<bool>,
+) -> Result<String, String> {
+    crate::core::switch::switch_to_provider(
+        &provider_id,
+        model_override.as_deref(),
+        restart.unwrap_or(false),
+    )
+    .await
+}
+
+/// Returns the current active runtime mode (Official account or Third-party provider).
+#[tauri::command]
+pub async fn get_active_runtime_mode() -> Result<Value, String> {
+    let mode = crate::core::switch::get_active_runtime_mode()?;
+    serde_json::to_value(mode).map_err(|e| e.to_string())
+}

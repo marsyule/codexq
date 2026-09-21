@@ -182,9 +182,35 @@ pub fn get_connection() -> Result<Connection, String> {
 
          CREATE INDEX IF NOT EXISTS idx_account_alarms_identity
              ON account_alarms(identity_key);
+
+          CREATE TABLE IF NOT EXISTS providers (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              base_url TEXT NOT NULL,
+              wire_api TEXT NOT NULL DEFAULT 'responses',
+              active_model TEXT NOT NULL,
+              models_json TEXT NOT NULL DEFAULT '[]',
+              context_window INTEGER DEFAULT 256000,
+              model_context_windows TEXT DEFAULT '{}',
+              notes TEXT,
+              custom_config_toml TEXT,
+              custom_auth_json TEXT,
+              key_masked TEXT NOT NULL DEFAULT '',
+              key_sha256 TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+          );
         ",
     )
     .map_err(|e| format!("Failed to migrate database schema: {e}"))?;
+
+    // Safe migration for existing installations
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN custom_config_toml TEXT", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN custom_auth_json TEXT", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN context_window INTEGER DEFAULT 256000", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN model_context_windows TEXT DEFAULT '{}'", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN key_masked TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN key_sha256 TEXT NOT NULL DEFAULT ''", []);
 
     Ok(conn)
 }
@@ -923,4 +949,203 @@ pub fn get_history(target: &str, limit: u32) -> Result<Vec<SnapshotRecord>, Stri
         results.push(r.map_err(|e| e.to_string())?);
     }
     Ok(results)
+}
+
+/// Lists all third-party providers from SQLite database.
+pub fn list_providers() -> Result<Vec<super::provider::Provider>, String> {
+    let conn = get_connection()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, base_url, wire_api, active_model, models_json,
+                    notes, custom_config_toml, custom_auth_json, key_masked, created_at, updated_at,
+                    context_window, model_context_windows
+             FROM providers
+             ORDER BY updated_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let models_raw: String = row.get(5)?;
+            let models: Vec<String> = serde_json::from_str(&models_raw).unwrap_or_default();
+            let context_window: Option<u64> = row.get(12).unwrap_or(None);
+            let model_contexts_raw: Option<String> = row.get(13).unwrap_or(None);
+            let model_context_windows = model_contexts_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            Ok(super::provider::Provider {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                base_url: row.get(2)?,
+                wire_api: row.get(3)?,
+                active_model: row.get(4)?,
+                models,
+                context_window,
+                model_context_windows,
+                notes: row.get(6)?,
+                custom_config_toml: row.get(7)?,
+                custom_auth_json: row.get(8)?,
+                key_masked: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut list = Vec::new();
+    for r in rows {
+        list.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(list)
+}
+
+/// Retrieves a single third-party provider by ID.
+pub fn get_provider(id: &str) -> Result<Option<super::provider::Provider>, String> {
+    let conn = get_connection()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, base_url, wire_api, active_model, models_json,
+                    notes, custom_config_toml, custom_auth_json, key_masked, created_at, updated_at,
+                    context_window, model_context_windows
+             FROM providers
+             WHERE id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut rows = stmt
+        .query_map(params![id], |row| {
+            let models_raw: String = row.get(5)?;
+            let models: Vec<String> = serde_json::from_str(&models_raw).unwrap_or_default();
+            let context_window: Option<u64> = row.get(12).unwrap_or(None);
+            let model_contexts_raw: Option<String> = row.get(13).unwrap_or(None);
+            let model_context_windows = model_contexts_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            Ok(super::provider::Provider {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                base_url: row.get(2)?,
+                wire_api: row.get(3)?,
+                active_model: row.get(4)?,
+                models,
+                context_window,
+                model_context_windows,
+                notes: row.get(6)?,
+                custom_config_toml: row.get(7)?,
+                custom_auth_json: row.get(8)?,
+                key_masked: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    if let Some(res) = rows.next() {
+        Ok(Some(res.map_err(|e| e.to_string())?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Inserts or updates a third-party provider record in SQLite.
+pub fn upsert_provider(
+    provider: &super::provider::Provider,
+    key_sha256: &str,
+) -> Result<(), String> {
+    let conn = get_connection()?;
+    let models_json = serde_json::to_string(&provider.models).unwrap_or_else(|_| "[]".to_string());
+    let model_contexts_json = serde_json::to_string(
+        &provider.model_context_windows.clone().unwrap_or_default(),
+    )
+    .unwrap_or_else(|_| "{}".to_string());
+    let context_window_val = provider.context_window.unwrap_or(super::provider::DEFAULT_MIN_CONTEXT_WINDOW);
+
+    conn.execute(
+        "INSERT INTO providers (
+            id, name, base_url, wire_api, active_model, models_json,
+            context_window, model_context_windows,
+            notes, custom_config_toml, custom_auth_json, key_masked, key_sha256, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            base_url = excluded.base_url,
+            wire_api = excluded.wire_api,
+            active_model = excluded.active_model,
+            models_json = excluded.models_json,
+            context_window = excluded.context_window,
+            model_context_windows = excluded.model_context_windows,
+            notes = excluded.notes,
+            custom_config_toml = excluded.custom_config_toml,
+            custom_auth_json = excluded.custom_auth_json,
+            key_masked = excluded.key_masked,
+            key_sha256 = CASE WHEN excluded.key_sha256 = '' THEN providers.key_sha256 ELSE excluded.key_sha256 END,
+            updated_at = excluded.updated_at",
+        params![
+            provider.id,
+            provider.name,
+            provider.base_url,
+            provider.wire_api,
+            provider.active_model,
+            models_json,
+            context_window_val,
+            model_contexts_json,
+            provider.notes,
+            provider.custom_config_toml,
+            provider.custom_auth_json,
+            provider.key_masked,
+            key_sha256,
+            provider.created_at,
+            provider.updated_at
+        ],
+    )
+    .map_err(|e| format!("Failed to upsert provider in SQLite: {e}"))?;
+
+    Ok(())
+}
+
+/// Returns the stored SHA256 hash of a provider's API key, or `None` when unset.
+///
+/// Used to preserve the existing key fingerprint when a provider is edited without
+/// supplying a new plaintext key.
+///
+/// # Errors
+///
+/// Returns `Err` if the database cannot be opened or queried.
+pub fn get_provider_key_hash(id: &str) -> Result<Option<String>, String> {
+    let conn = get_connection()?;
+    let mut stmt = conn
+        .prepare("SELECT key_sha256 FROM providers WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query_map(params![id], |row| row.get::<_, Option<String>>(0))
+        .map_err(|e| e.to_string())?;
+    if let Some(res) = rows.next() {
+        let value = res.map_err(|e| e.to_string())?;
+        Ok(value.filter(|s| !s.is_empty()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Updates the active model for a provider.
+pub fn update_provider_active_model(id: &str, model: &str) -> Result<(), String> {
+    let conn = get_connection()?;
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    conn.execute(
+        "UPDATE providers SET active_model = ?1, updated_at = ?2 WHERE id = ?3",
+        params![model, now, id],
+    )
+    .map_err(|e| format!("Failed to update provider active model: {e}"))?;
+    Ok(())
+}
+
+/// Deletes a provider from database and purges its sandbox files.
+pub fn delete_provider(id: &str) -> Result<bool, String> {
+    let conn = get_connection()?;
+    let count = conn
+        .execute("DELETE FROM providers WHERE id = ?1", params![id])
+        .map_err(|e| format!("Failed to delete provider: {e}"))?;
+
+    let _ = super::provider::delete_provider_files(id);
+    Ok(count > 0)
 }

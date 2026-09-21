@@ -17,6 +17,7 @@ flowchart TD
     subgraph DesktopHost["桌面壳层与原生核心 (Tauri 2 / Rust Core)"]
         TauriCmd["Tauri Native Commands"]
         RustCore["CodexQ Core Engine"]
+        ProviderMgr["Provider Manager (core/provider.rs)"]
         Store["Store (rusqlite WAL + Profiles 沙箱)"]
         Scheduler["Tokio 异步错峰闹钟调度器"]
         Probe["Tokio 异步子进程探测池 (Semaphore)"]
@@ -25,12 +26,16 @@ flowchart TD
     subgraph FileSystem["本地存储与凭据沙箱 (`~/.codexq`)"]
         DB[(codexq.db)]
         Profiles["profiles/<profile-id>/auth.json\n(强制 cli_auth_credentials_store = 'file')"]
+        ProviderSecrets["providers/<id>/key + models.json\n(0600 密钥沙箱)"]
+        Backups["backups/<ts>_<reason>/\n(运行时快照, 最多保留 20 份)"]
         Trash["trash/<profile-id>/"]
         ConfigJson["config.json (纯文本原子写入)"]
     end
 
     subgraph CodexSubsystem["宿主机 Codex CLI 系统"]
         CodexAuth["~/.codex/auth.json (当前活跃凭据)"]
+        CodexConfig["~/.codex/config.toml\n(model_provider 路由 + 服务商表)"]
+        ModelCatalogs["~/.codex/model-catalogs/\ncodexq-<id>.json (可查阅工件)"]
         AppServer["codex app-server (官方子进程)"]
         CodexExec["codex exec --ephemeral (无痕预热)"]
     end
@@ -38,13 +43,18 @@ flowchart TD
     ReactApp <-->|Tauri IPC invoke| TauriCmd
     TauriCmd <--> RustCore
     RustCore --> Store
+    RustCore --> ProviderMgr
     RustCore --> Scheduler
     RustCore --> Probe
     Store <--> DB
     Store <--> Profiles
     Store <--> Trash
     Store <--> ConfigJson
+    ProviderMgr <--> ProviderSecrets
+    ProviderMgr --> ModelCatalogs
+    RustCore --> Backups
     RustCore <-->|自动感知 & 原子无损切号| CodexAuth
+    RustCore <-->|服务商路由无损注入| CodexConfig
     Probe <-->|CODEX_HOME 隔离探测| AppServer
     Scheduler -->|定时触发| CodexExec
 ```
@@ -63,13 +73,19 @@ flowchart TD
 │   └── <profile-id>/         # 账号 profile_id（基于 identity_key 计算的 SHA256 前 20 位）
 │       ├── auth.json         # 账号独立的凭据镜像（chmod 0600）
 │       └── config.toml       # 配置文件（强制声明 cli_auth_credentials_store = "file"）
+├── providers/                # 第三方模型服务商的密钥沙箱与模型目录
+│   └── <provider-id>/        # 服务商 slug（规范化小写，冲突时追加 -2/-3 后缀）
+│       ├── key               # 明文 API Key（chmod 0600，绝不写入 SQLite）
+│       └── models.json       # 该服务商的 Codex 模型目录产物（chmod 0600）
+├── backups/                  # 切换前运行时快照（auth.json + config.toml，最多保留 20 份）
+│   └── <YYYYMMDD_HHMMSS>_<reason>/
 └── trash/                    # 回收站隔离目录
     └── <profile-id>/
 ```
 
 ### 2.1 SQLite Schema 定义
 
-`codexq.db` 包含五张核心数据表（账号、最新额度、快照历史、回收站、闹钟）：
+`codexq.db` 包含六张核心数据表（账号、最新额度、快照历史、回收站、闹钟、第三方服务商）：
 
 ```sql
 -- 1. 账号主表
@@ -154,7 +170,28 @@ CREATE TABLE IF NOT EXISTS account_alarms (
 );
 CREATE INDEX IF NOT EXISTS idx_account_alarms_identity
     ON account_alarms(identity_key);
+
+-- 6. 第三方 AI 服务商元数据表（明文密钥绝不入库）
+CREATE TABLE IF NOT EXISTS providers (
+    id TEXT PRIMARY KEY,                        -- 服务商 slug（规范化小写，冲突时追加 -2/-3）
+    name TEXT NOT NULL,                         -- 展示名称
+    base_url TEXT NOT NULL,                     -- OpenAI 兼容端点基址
+    wire_api TEXT NOT NULL DEFAULT 'responses', -- 线协议 (responses / chat / completions)
+    active_model TEXT NOT NULL,                 -- 当前激活模型 slug
+    models_json TEXT NOT NULL DEFAULT '[]',     -- 模型池 JSON 数组
+    context_window INTEGER DEFAULT 256000,      -- 工作窗口（硬性保底 256k）
+    model_context_windows TEXT DEFAULT '{}',    -- 单模型窗口覆盖 {"model": tokens}
+    notes TEXT,                                 -- 备注说明
+    custom_config_toml TEXT,                    -- 高级：自定义注入的 TOML 片段
+    custom_auth_json TEXT,                      -- 高级：自定义写入的 auth.json
+    key_masked TEXT NOT NULL DEFAULT '',        -- 掩码展示值（如 sk-ab****cdef）
+    key_sha256 TEXT NOT NULL DEFAULT '',        -- 密钥 SHA256 校验和（用于变更检测）
+    created_at TEXT NOT NULL,                   -- 创建时间 (ISO 8601 UTC)
+    updated_at TEXT NOT NULL                    -- 最近更新时间 (ISO 8601 UTC)
+);
 ```
+
+> **跨端 schema 契约**：Rust 与 Python 共用同一份 `codexq.db`，两侧 `CREATE TABLE providers` 必须逐列兼容，新增列一律通过 `ALTER TABLE ... ADD COLUMN` 幂等兜底（含 `DEFAULT`）以兼容旧库。历史上曾因两侧列集不一致触发 `NOT NULL constraint failed: providers.key_masked`，详见 `docs/work/history.md` 第 15 节。
 
 ### 2.2 全局配置文件规范 (`~/.codexq/config.json`)
 
@@ -236,6 +273,15 @@ OpenAI 官方客户端采用 **Refresh Token Rotation (RTR)** 机制维护认证
 - **状态重激活**：当检测到备份中有更新的凭证且 SHA256 发生改变时，自动将凭证同步吸纳至 Profile，并把数据库中的 `credential_status` 重新拉回 `active`、清空 `last_error`。
 - **用户显式删除保护**：被用户显式移入回收站 (`removed_accounts`) 的账号被严格忽略，防止因扫描历史备份而意外复活。
 
+### 3.5 第三方服务商密钥沙箱 (Provider Key Sandboxing)
+与官方账号凭据同等严格，第三方服务商的明文 API Key 不进入 SQLite：
+- **文件即密钥**：明文 Key 仅写入 `~/.codexq/providers/<provider-id>/key`，以 `0600` 权限落盘；数据库 `providers` 表仅保存 `key_masked`（显示掩码）与 `key_sha256`（变更检测校验和）。
+- **掩码规则（Rust / Python 一致）**：`sk-` 前缀保留前 5 字符，其他前缀保留前 3 字符，尾部固定保留 4 字符，中间以 `****` 替换；长度 ≤ 8 的密钥整体显示为 `****`。
+- **空密钥保留语义**：编辑服务商时若未重填 Key，`upsert_provider` 必须保留原有 `key_sha256` / `key_masked`，避免静默清空校验和（Rust 侧通过 `CASE WHEN excluded.key_sha256 = '' THEN providers.key_sha256` 实现）。
+- **删除即抹除**：`delete_provider` 同时移除数据库记录与整个 `providers/<id>/` 沙箱目录，不留明文残余。
+
+> 运行时槽位切换（`switch_to_provider` / 切回官方）与 `config.toml` 注入细节见第 8 章。
+
 ---
 
 ## 4. 通信契约与指令层
@@ -261,6 +307,12 @@ OpenAI 官方客户端采用 **Refresh Token Rotation (RTR)** 机制维护认证
   - `delete_account_alarm(id: String)`: 删除指定闹钟。
   - `trigger_warmup(target, model, prompt, force, timeout)`: 立即触发单次预热问候请求。
   - `set_locale(locale: String)`: 动态重绘系统原生托盘菜单语言。
+  - `list_providers()`: 获取第三方服务商列表（仅掩码，明文密钥永不返回）。
+  - `save_provider(payload: SaveProviderPayload)`: 新增或更新服务商；密钥写入独立 `0600` 沙箱文件，DB 仅存掩码与 SHA256。
+  - `delete_provider(id: String)`: 删除服务商记录、密钥沙箱与 catalog 产物。
+  - `test_provider_connectivity(base_url, api_key, ...)`: 探测 OpenAI 兼容端点 `GET /models`，返回状态码、延时与可用模型列表。
+  - `switch_to_provider(provider_id, model_override, restart)`: 原子切换到第三方服务商运行时槽位。
+  - `get_active_runtime_mode()`: 读取宿主机 `config.toml`，判定当前处于官方账号模式还是第三方服务商模式。
 
 ### 4.2 Rust 核心与 Codex CLI 交互：`codex app-server`
 - Rust 通过 `tokio::process::Command` 启动后台子进程 `codex app-server --stdio`（Windows 平台启用 `CREATE_NO_WINDOW` 0 弹窗闪烁）。
@@ -391,8 +443,8 @@ CodexQ 采用工业级多语言分层架构：**英文基线兜底、前端驱�
 ### 7.2 前端 UI 层 (React 19 + `i18next`)
 - **基线兜底 (`fallbackLng: "en-US"`)**：任何缺失或未翻译的 Key 自动回退至标准英文，保证 UI 不留白、不泄露原始键名。
 - **语言包物理分布**：
-  - `src/locales/en-US.json`：全量英文标准字典（Source of Truth）。
-  - `src/locales/zh-CN.json`：简体中文资源包。
+  - `src/i18n/locales/en-US.json`：全量英文标准字典（Source of Truth）。
+  - `src/i18n/locales/zh-CN.json`：简体中文资源包。
 - **即时响应式热切换**：用户在【设置与关于】切换语言后，React 组件树无需重载页面即可实时重绘；并联动持久化至 `config.json`。
 
 ### 7.3 系统壳层 (Tauri 2 / Rust)
@@ -415,3 +467,64 @@ CodexQ 采用工业级多语言分层架构：**英文基线兜底、前端驱�
   ```
   前端优先按 `code` 查本地语言包渲染；未匹配时优雅降级展示英文 `message`。
 - **CLI 终端输出**：默认输出英文对齐官方 Codex CLI；可选读取 `config.json` 针对终端表格和提示进行轻量字典映射。
+
+---
+
+## 8. 第三方 AI 服务商接入与统一运行时槽位 (Third-Party Providers & Unified Runtime Slot)
+
+### 8.1 设计目标与边界
+CodexQ 在保留官方多账号 5H/周度额度探针与防损切号能力的同时，支持接入任意兼容 OpenAI 规范的第三方模型端点（DeepSeek、StepFun、SiliconFlow、OpenRouter 等）：
+- **支持线协议**：`responses`（默认）以及 `chat` / `completions`，由服务商配置的 `wire_api` 决定。
+- **不代理流量**：CodexQ 只把 `model_provider`、`model`、`[model_providers.<id>]` 与凭据写进 `~/.codex/config.toml`，实际模型请求由 Codex CLI 直连服务商；CodexQ 自身不转发、不缓存、不代理任何请求（与 PROJECT.md 非目标一致）。
+- **互斥的单一槽位**：`config.toml` 顶层只有一个 `model_provider` 槽位，因此「官方账号模式」与「第三方服务商模式」互斥，`get_active_runtime_mode` 是判定当前模式的唯一真理源。
+
+### 8.2 运行时槽位切换状态机
+`core/switch.rs` 以 `ActiveRuntimeMode`（`Official` / `Provider`）为中心实现双向原子切换：
+
+**切到第三方（`switch_to_provider`）**：
+1. `ensure_host_codex_config()` 确保宿主机 `config.toml` 声明 `cli_auth_credentials_store = "file"`；
+2. `create_runtime_snapshot("to_provider_<id>")` 快照当前 `auth.json` + `config.toml`；
+3. 若当前处于官方模式，`auto_sync_current()` 先把活跃 Token 归档回其 Profile，防止切走时丢失刷新后的凭据；
+4. 载入服务商元数据与沙箱密钥，解析生效模型（`model_override` 优先，否则 `active_model`）；
+5. 生成模型目录产物；
+6. 以 `toml_edit` 无损注入 `config.toml`（详见 8.3）；
+7. 仅当配置了 `custom_auth_json` 时才覆写活跃 `auth.json`，否则**保留官方凭据原样**（不破坏官方登录态）。
+
+**切回官方（`switch_account`）**：
+- 仅当顶层 `model_provider` 指向一个已注册的第三方服务商时才执行清理：移除顶层 `model` / `model_provider`、删除 `[model_providers.<id>]` 表（其中含明文 bearer token）并清除 `model_catalog_json` 残留键；
+- 若 `model_provider` 缺失、为 `"openai"` 或指向未知 id，则视为官方模式，**保留用户自定义的 `model` 与其它配置**；
+- 之后按 §3.2 的原子流程写入目标账号凭据。
+
+**快照有界**：`MAX_RUNTIME_SNAPSHOTS = 20`，每次切换后裁剪最旧的 `~/.codexq/backups/<ts>_<reason>`，避免明文凭据备份无限增长。
+
+**官方 id 归一**：`is_official_provider_id()` 将 `openai` 视为官方路由，避免把官方默认配置误判为第三方模式（Rust / Python 行为一致）。
+
+### 8.3 `config.toml` 无损注入与非法键禁令
+- **Rust 端**：使用 `toml_edit::DocumentMut` 就地修改承载用户配置的文档树，完整保留注释、缩进与未触碰的表（含 MCP 服务声明）。
+- **Python 端**：受 Python 3.10+ 纯标准库约束（`tomllib` 只读），采用逐行解析实现等价语义：顶层键就地替换/插入，`[model_providers.<id>]` 表整表重写，其余行原样透传。
+- **标准注入内容**：
+  ```toml
+  model = "<active-model>"
+  model_provider = "<provider-id>"
+
+  [model_providers.<provider-id>]
+  name = "..."
+  base_url = "https://..."
+  wire_api = "responses"
+  experimental_bearer_token = "<plaintext-key>"
+  ```
+- **高级覆写**：服务商可携带 `custom_config_toml`，此时以自定义片段**替代**标准 provider 表注入；`custom_auth_json` 则用于覆写活跃 `auth.json`。
+- **非法键禁令**：严禁写入根级 `model_catalog_json`。Codex CLI ≥ 0.149.1 会将该未声明键判为致命配置错误（`config could not be loaded`），进而导致桌面端提示「无法加载登录要求」。因此两个切换方向都会主动删除历史残留键（首次发现于任务 20，复核修复于任务 22）。
+
+### 8.4 模型目录与上下文窗口 / 自动压缩策略
+- **产物路径**：`~/.codexq/providers/<id>/models.json`，并镜像一份到 `<codex_home>/model-catalogs/codexq-<id>.json`。
+- **产物定位**：当前仅作为可查阅工件与未来接入点，**不通过** `model_catalog_json` 参与运行时加载；CodexQ 通过 `config.toml` 的 `model` / `model_provider` 完成路由。
+- **上下文窗口解析**：按 `单模型覆盖 (model_context_windows)` → `服务商默认 (context_window)` → `DEFAULT_MIN_CONTEXT_WINDOW = 256_000` 依次回退，最终统一执行 `.max(256_000)` 硬性保底（低于 256K 一律向上 clamp）。
+- **目录条目关键字段**：`context_window = max_context_window = 解析后的工作窗口`，`effective_context_window_percent = 95`。
+- **自动压缩阈值**：`auto_compact_token_limit = 工作窗口 × 85 / 100`（整数除法）。实测取值：256K → 217,600；512K → 435,200；1M → 850,000。
+- **取值依据**：Codex 官方内置目录默认在物理窗口约 90% 处压缩，CodexQ 把压缩点提前到**用户声明的工作窗口**的 85%，以减少 stale context 长期累积；`effective_context_window_percent = 95%` 保留为 Codex 侧的 headroom，在 85% 已生效时通常不参与决策，仅在单回合突发（如一次性读取大文件）时起保护垫作用。
+
+### 8.5 交互入口
+- **桌面端**：`ProvidersView` 选项卡（侧边栏 `nav.providers`）承载服务商列表与模糊检索；`ProviderCard` 提供多模型下拉即时切换、连通性 Ping、编辑与安全删除；`AddProviderModal` 提供通用表单、上游 `GET /models` 候选池检索导入、上下文长度预设（256K / 512K / 1M / 2M）与自定义单位解析、以及 `config.toml` / `auth.json` 高级文本框；`ActiveHeroCard` 展示服务商模式运行状态并提供「切回官方账号」快捷入口。
+- **Python CLI**：`codexq provider list | add | use | test | remove` 子命令，遵循纯标准库零依赖约束。
+- **JSON-RPC**：`list_providers`、`switch_to_provider`、`get_active_runtime_mode` 等标准方法（供宿主与脚本长连接调用）。

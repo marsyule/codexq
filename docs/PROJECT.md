@@ -6,7 +6,7 @@
 
 ## 1. 项目定位与目标
 
-CodexQ 是一款专为 OpenAI Codex CLI 开发者设计的**本地、轻量、高性能多账号额度管理与无缝切换工具**。它旨在消除多账号开发场景下的频繁重登、额度焦虑、Token 覆盖丢失以及切号繁琐等痛点。
+CodexQ 是一款专为 OpenAI Codex CLI 开发者设计的**本地、轻量、高性能多账号额度管理、无缝切号与模型路由工具**。它旨在消除多账号开发场景下的频繁重登、额度焦虑、Token 覆盖丢失以及切号繁琐等痛点，并可接入任意兼容 OpenAI 规范的第三方模型服务商。
 
 ### 核心设计原则
 1. **零配置、自感知**：无需显式初始化或繁重的扫描命令，执行任何命令时均静默感知当前登录状态与备份凭据。
@@ -23,6 +23,12 @@ CodexQ 是一款专为 OpenAI Codex CLI 开发者设计的**本地、轻量、�
 - **多账号额度并发轮询**：
   - 桌面端：Rust Core 内置 Tokio 异步子进程探测池与信号量调度；
   - Python 端：`asyncio` 异步子进程调度；多账号全量并发刷新秒级完成。
+- **第三方模型服务商接入 (`provider`)**：
+  - 支持任意兼容 OpenAI `responses`（或 `chat` / `completions`）线协议的第三方端点（DeepSeek、StepFun、SiliconFlow、OpenRouter 等），提供模型池管理与单模型独立上下文覆盖；
+  - 明文 API Key 仅存于 `~/.codexq/providers/<id>/key`（`0600`），SQLite 只保存掩码与 SHA256 校验和；
+  - 采用**统一运行时槽位**：以 AST 级无损方式注入 `~/.codex/config.toml`（完整保留注释、MCP 与用户配置），官方账号与第三方服务商互斥切换，切回官方时自动清理服务商表与残留非法键；
+  - 上下文窗口硬性保底 256K，自动压缩阈值固定为工作窗口的 85%；
+  - 桌面端提供「模型服务商」选项卡（卡片切换、连通性 Ping、上游模型池拉取、高级 TOML/JSON 覆写），Python 端提供 `codexq provider list|add|use|test|remove` 子命令与 JSON-RPC 接口。
 - **原子无损切号 (`switch`)**：
   - 切号前自动检测当前运行中账号的最新 Token 并归档回其专属 Profile。
   - 原子性写入目标账号凭据至 `~/.codex/auth.json`。
@@ -68,6 +74,6 @@ CodexQ 是一款专为 OpenAI Codex CLI 开发者设计的**本地、轻量、�
 
 - **不做浏览器自动化登录或验证码破解**：CodexQ 不伪造登录请求，不绕过 Cloudflare，仅管理已在官方 CLI 成功登录的合法凭据。
 - **不做跨设备云端凭据同步**：所有 Profile 和 SQLite 数据均物理保存在本地 `~/.codexq/`，不提供任何中心化云存储服务。
-- **不做多机代理池或请求流量转发**：CodexQ 是账号状态与额度管理器，而非 API 网关或 Load Balancer。
+- **不做多机代理池或请求流量转发**：CodexQ 是账号状态、额度与运行时路由管理器，而非 API 网关或 Load Balancer。接入第三方服务商时，CodexQ 仅将 `base_url` / `wire_api` / 凭据写入 `~/.codex/config.toml` 交由 Codex CLI 直连，自身不代理、不缓存、不转发任何模型请求。
 - **桌面端不依赖外部 Python 运行时**：桌面端所有存储、探测、切号与调度均由纯 Rust 原生实现，严禁退化回依赖外部 Python 进程。
 - **Python 端不引入重量级依赖框架**：严禁为了轻微的开发便利引入 FastAPI, SQLAlchemy, Pydantic, Requests 等第三方包。
