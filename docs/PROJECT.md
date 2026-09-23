@@ -6,15 +6,16 @@
 
 ## 1. 项目定位与目标
 
-CodexQ 是一款专为 OpenAI Codex CLI 开发者设计的**本地、轻量、高性能多账号额度管理与无缝切换工具**。它旨在消除多账号开发场景下的频繁重登、额度焦虑、Token 覆盖丢失以及切号繁琐等痛点。
+CodexQ 是一款专为 OpenAI Codex CLI 开发者设计的**本地、轻量、高性能多账号额度管理、无缝切号、模型路由与协议适配工具**。它旨在消除多账号开发场景下的频繁重登、额度焦虑、Token 覆盖丢失、切号繁琐以及第三方服务商协议不兼容等痛点，并可接入任意兼容 OpenAI 规范、或仅提供 Chat Completions 的第三方模型服务商。
 
 ### 核心设计原则
 1. **零配置、自感知**：无需显式初始化或繁重的扫描命令，执行任何命令时均静默感知当前登录状态与备份凭据。
 2. **绝对安全与本地化**：零云端上报，凭据严格沙箱隔离，SQLite 不存明文敏感信息，Token 防丢优先于一切操作。
 3. **极简依赖、随处可用**：
    - 桌面端基于 **Tauri 2 (纯 Rust 原生核心 + React 19)** 编译为独立绿色单二进制程序，**零外部 Python 运行时依赖**；
-   - Python CLI / SDK 伴侣基于**纯标准库**构建，单文件拷贝即用，零第三方包。
+   - Python CLI / SDK 伴侣基于**纯标准库**构建，单文件拷贝即用，零第三方包（该端已冻结维护，见 §3）。
 4. **官方对齐 (Remaining-first)**：百分之百对齐 OpenAI 官方仪表盘逻辑，展示**剩余可用百分比**与**重置轮次**，拒绝反直觉的已消耗推算。
+5. **协议差异内部消化**：Codex CLI 的线协议演进（如 chat/completions 的移除）由 CodexQ 内部适配层吸收，用户侧永远只需面对一个可用配置，绝不把协议不兼容转嫁为用户的排查负担。
 
 ---
 
@@ -23,6 +24,21 @@ CodexQ 是一款专为 OpenAI Codex CLI 开发者设计的**本地、轻量、�
 - **多账号额度并发轮询**：
   - 桌面端：Rust Core 内置 Tokio 异步子进程探测池与信号量调度；
   - Python 端：`asyncio` 异步子进程调度；多账号全量并发刷新秒级完成。
+- **第三方模型服务商接入 (`provider`)**：
+  - 支持任意兼容 OpenAI `responses` 线协议、或仅提供 `chat/completions` 的第三方端点（DeepSeek、StepFun、SiliconFlow、OpenRouter 等），提供模型池管理与单模型独立上下文覆盖；
+  - **本地路由总开关 + 协议按模型声明**：编辑器顶部通过 `gateway_enabled` 开启/关闭本地协议网关。关闭时所有模型统一按 `responses` 直连、不显示协议选择，保存时归一为 Responses 并清空覆盖；开启后每个模型可独立选择，混合协议由网关逐请求分流；
+  - 仅提供 Chat Completions 的模型由内置**本地协议网关**透明适配（见下条），对 Codex CLI 始终以 `responses` 协议暴露，用户无需自备转换代理；
+  - 明文 API Key 仅存于 `~/.codexq/providers/<id>/key`（`0600`），SQLite 只保存掩码与 SHA256 校验和；
+  - 采用**统一运行时槽位**：以 AST 级无损方式注入 `~/.codex/config.toml`（完整保留注释、MCP 与用户配置），官方账号与第三方服务商互斥切换，切回官方时自动清理服务商表与残留非法键；
+  - 上下文窗口硬性保底 256K，自动压缩阈值固定为工作窗口的 85%；
+  - 桌面端提供「模型服务商」选项卡（卡片切换、连通性 Ping、上游模型池拉取、高级 TOML/JSON 覆写），Python 端提供 `codexq provider list|add|use|test|remove` 子命令与 JSON-RPC 接口。
+- **本地协议网关 (Local Protocol Gateway)**：
+  - 内置仅绑定 `127.0.0.1` 回环地址的 HTTP 网关，在 Codex CLI 与仅支持 Chat Completions 的上游之间做**双向协议适配**：Responses 请求 → Chat Completions 请求，Chat Completions 响应 → Responses 响应，覆盖流式 SSE、工具调用与推理内容回译；
+  - **对 Codex 永远只暴露 `wire_api = "responses"`**。Codex 自 2026 年 2 月起已彻底移除 chat 线协议，写入 `wire_api = "chat"` 会导致整份 `config.toml` 加载失败并波及其它命令；协议差异一律由网关承担；
+  - **逐请求按模型分流**：协议在每次请求时依据请求体中的 `model` 字段解析，因此用户在 Codex 会话中用 `/model` 中途换模型也能正确分流——若在写入配置时就固化协议，中途换模型必然走错端点；
+  - 网关**永不对外暴露**：仅监听回环网卡、拒绝非本机来源请求、不缓存请求体与响应体、不落盘任何会话内容；
+  - 声明为 `responses` 的模型在网关内**原样透传**（字节级等价直连），只有声明为 `chat` 的模型才做协议转换；总开关关闭、或开启后全部模型均为 `responses` 的服务商完全不经过网关，不引入额外跳数，也不启动网关进程；
+  - 网关按服务商粒度开关，关闭或切回直连后自动回滚 `base_url` 并停止不再使用的本地监听。
 - **原子无损切号 (`switch`)**：
   - 切号前自动检测当前运行中账号的最新 Token 并归档回其专属 Profile。
   - 原子性写入目标账号凭据至 `~/.codex/auth.json`。
@@ -54,11 +70,8 @@ CodexQ 是一款专为 OpenAI Codex CLI 开发者设计的**本地、轻量、�
 - **宿主进程管理 (`restart`)**：
   - 支持一键快速重启 Codex 桌面客户端；若未运行，主动拉起启动。
 - **多端暴露形式**：
-  - **桌面 GUI**：Tauri 2 托盘常驻绿色免安装桌面客户端（In-Process Tauri Native Commands 进程内通信，零 Python 依赖）。
-  - **CLI**：单文件标准库命令行工具，支持彩色终端输出与 `--json` 机器格式。
-  - **Python Async SDK**：`from codexq import CodexQ`。
-  - **本地 REST API**：内置极简 HTTP 服务器 (`codexq serve`)。
-  - **stdio JSON-RPC 服务**：面向宿主或脚本的长连接子进程接口 (`codexq rpc`)。
+  - **桌面 GUI（主线）**：Tauri 2 托盘常驻绿色免安装桌面客户端（In-Process Tauri Native Commands 进程内通信，零 Python 依赖）。**当前唯一的活跃开发载体**。
+  - **CLI / Python Async SDK / 本地 REST API / stdio JSON-RPC 服务（冻结）**：由单文件标准库 `codexq.py` 提供（`codexq` 命令行、`from codexq import CodexQ`、`codexq serve`、`codexq rpc`）。该端自 v1.0.x 起进入冻结维护，仅修复阻塞级缺陷与安全问题，不再承接新功能；**新增能力一律只落在桌面端**。
 
 ---
 
@@ -68,6 +81,7 @@ CodexQ 是一款专为 OpenAI Codex CLI 开发者设计的**本地、轻量、�
 
 - **不做浏览器自动化登录或验证码破解**：CodexQ 不伪造登录请求，不绕过 Cloudflare，仅管理已在官方 CLI 成功登录的合法凭据。
 - **不做跨设备云端凭据同步**：所有 Profile 和 SQLite 数据均物理保存在本地 `~/.codexq/`，不提供任何中心化云存储服务。
-- **不做多机代理池或请求流量转发**：CodexQ 是账号状态与额度管理器，而非 API 网关或 Load Balancer。
+- **不做多机代理池、云端中转与公网暴露**：CodexQ 的协议能力严格限定在**本机回环**范围内。本地协议网关仅服务于本机 Codex CLI 的协议适配，**不做**跨设备/多机节点调度，**不做**公网可访问的 API 网关，**不做**账号池负载均衡，**不做**将请求转发至第三方中转网络或公网代理服务。网关绑定 `127.0.0.1`，不监听外部网卡；凭据与请求内容不出本机。
 - **桌面端不依赖外部 Python 运行时**：桌面端所有存储、探测、切号与调度均由纯 Rust 原生实现，严禁退化回依赖外部 Python 进程。
 - **Python 端不引入重量级依赖框架**：严禁为了轻微的开发便利引入 FastAPI, SQLAlchemy, Pydantic, Requests 等第三方包。
+- **Python 端暂停功能演进（Freeze）**：`codexq.py` 进入**冻结维护**状态——仅接受阻塞级缺陷修复与安全修复，不再承接新功能、不再跟随架构演进。所有产品迭代与工程投入全面聚焦桌面端（Tauri 2 / Rust / React 19）。

@@ -71,15 +71,52 @@ pub fn run() {
             commands::run_diagnostics,
             commands::get_account_rollover,
             commands::save_account_rollover,
+            commands::list_providers,
+            commands::save_provider,
+            commands::delete_provider,
+            commands::test_provider_connectivity,
+            commands::switch_to_provider,
+            commands::get_active_runtime_mode,
+            commands::get_gateway_status,
+            commands::restart_gateway,
+            commands::check_gateway_port,
+            commands::set_gateway_port,
+            commands::set_gateway_enabled,
+            commands::open_model_catalog,
+            commands::show_model_catalog_in_folder,
+            commands::get_model_catalog_path,
         ])
         .setup(|app| {
             // Ensure host ~/.codex/config.toml enforces cli_auth_credentials_store = "file"
             let _ = crate::core::auth::ensure_host_codex_config();
+            if let Err(error) = crate::core::switch::ensure_inactive_provider_stubs() {
+                log::warn!(
+                    "could not restore inactive provider entries for saved sessions: {error}"
+                );
+            }
+            // One-shot per launch: derive `gateway_enabled` for providers whose stored
+            // protocol is a legacy Chat value (e.g. written by the frozen Python CLI).
+            // Deliberately NOT run on every DB connection — that would silently
+            // re-enable a switch the user turned off in the UI.
+            if let Err(error) = crate::core::db::migrate_gateway_enabled_derivation() {
+                log::warn!("could not derive gateway_enabled from legacy wire_api: {error}");
+            }
 
             let menu = create_tray_menu(app.handle(), "en-US")?;
 
             // Start background alarm scheduler ticker
             crate::core::scheduler::start_alarm_scheduler(Some(app.handle().clone()));
+
+            // Reconcile the loopback gateway with the active runtime slot. Direct
+            // providers and official mode stop it; only providers that actually need
+            // Chat Completions translation start it.
+            tauri::async_runtime::spawn(async move {
+                match crate::core::protocol_proxy::ensure_started_if_needed().await {
+                    Ok(Some(base_url)) => log::info!("protocol gateway ready at {base_url}"),
+                    Ok(None) => log::info!("protocol gateway not required"),
+                    Err(err) => log::info!("protocol gateway not started: {err}"),
+                }
+            });
 
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)

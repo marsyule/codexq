@@ -21,6 +21,7 @@ CodexQ adopts a **dual-track engineering architecture**:
 - **Staggered Warmup Scheduler**: Configures non-overlapping alarms per account ($\ge 5$ hour guard) to pre-warm rolling 5-hour quota windows via ephemeral pings.
 - **JIT Dynamic Refresh & Desktop Notifications**: Auto-refreshes quotas precisely when reset windows expire and sends native OS notifications upon full quota restoration.
 - **Profile Sandboxing & Security**: Enforces isolated profile sandboxes (`cli_auth_credentials_store = "file"`); SQLite never stores plaintext tokens.
+- **Third-Party Model Providers**: Attach any OpenAI-compatible endpoint (DeepSeek, StepFun, SiliconFlow, OpenRouter, ...) with a managed model pool and per-model context windows (256K floor, auto-compaction at 85%). Plaintext keys live in a `0600` sandbox, and `~/.codex/config.toml` is edited losslessly (comments and MCP blocks preserved), so official accounts and third-party providers share one atomic runtime slot.
 - **Zero-Dependency Python Companion**: Single-file Python script offering a full CLI, Python Async SDK (`from codexq import CodexQ`), local REST API, and stdio JSON-RPC.
 
 ---
@@ -37,6 +38,12 @@ All application data and isolated profiles reside in `~/.codexq/`:
 │   └── <profile-id>/         # Unique profile directory
 │       ├── auth.json         # Sandboxed credentials (chmod 0600)
 │       └── config.toml       # Enforces cli_auth_credentials_store = "file"
+├── providers/                # Third-party provider key sandboxes & model catalogs
+│   └── <provider-id>/
+│       ├── key               # Plaintext API key (chmod 0600, never stored in SQLite)
+│       └── models.json       # Generated Codex model catalog artifact
+├── backups/                  # Pre-switch runtime snapshots (auth.json + config.toml, max 20)
+│   └── <YYYYMMDD_HHMMSS>_<reason>/
 └── trash/                    # Soft-delete recycle bin
     └── <profile-id>/
 ```
@@ -183,6 +190,23 @@ python codexq.py history main --limit 20
 ```bash
 python codexq.py serve --port 8765
 python codexq.py rpc
+```
+
+### 12. Manage Third-Party Model Providers
+```bash
+# Add an OpenAI-compatible provider (optionally switch to it immediately with --switch)
+python codexq.py provider add DeepSeek \
+  --base-url https://api.deepseek.com/v1 \
+  --key sk-xxxx \
+  --model deepseek-chat \
+  --models deepseek-chat,deepseek-reasoner \
+  --context-window 256000
+
+# List / activate / probe / remove
+python codexq.py provider list
+python codexq.py provider use deepseek -m deepseek-reasoner
+python codexq.py provider test https://api.deepseek.com/v1 --key sk-xxxx
+python codexq.py provider remove deepseek
 ```
 
 ---

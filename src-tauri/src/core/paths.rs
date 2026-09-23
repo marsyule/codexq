@@ -97,3 +97,15 @@ pub fn profiles_dir() -> PathBuf {
 pub fn trash_dir() -> PathBuf {
     codexq_home().join("trash")
 }
+
+/// Returns the path to the third-party providers directory (`~/.codexq/providers`).
+#[must_use]
+pub fn providers_dir() -> PathBuf {
+    codexq_home().join("providers")
+}
+
+/// Returns the path to the backup snapshots directory (`~/.codexq/backups`).
+#[must_use]
+pub fn backups_dir() -> PathBuf {
+    codexq_home().join("backups")
+}

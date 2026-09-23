@@ -182,11 +182,74 @@ pub fn get_connection() -> Result<Connection, String> {
 
          CREATE INDEX IF NOT EXISTS idx_account_alarms_identity
              ON account_alarms(identity_key);
+
+          CREATE TABLE IF NOT EXISTS providers (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              base_url TEXT NOT NULL,
+              wire_api TEXT NOT NULL DEFAULT 'responses',
+              active_model TEXT NOT NULL,
+              models_json TEXT NOT NULL DEFAULT '[]',
+              context_window INTEGER DEFAULT 256000,
+              model_context_windows TEXT DEFAULT '{}',
+              reasoning_levels TEXT,
+              model_reasoning_levels TEXT,
+              model_wire_apis TEXT,
+              gateway_enabled INTEGER NOT NULL DEFAULT 0,
+              notes TEXT,
+              custom_config_toml TEXT,
+              custom_auth_json TEXT,
+              key_masked TEXT NOT NULL DEFAULT '',
+              key_sha256 TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+          );
         ",
     )
     .map_err(|e| format!("Failed to migrate database schema: {e}"))?;
 
+    // Safe migration for existing installations
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN custom_config_toml TEXT", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN custom_auth_json TEXT", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN context_window INTEGER DEFAULT 256000", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN model_context_windows TEXT DEFAULT '{}'", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN key_masked TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN key_sha256 TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN reasoning_levels TEXT", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN model_reasoning_levels TEXT", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN model_wire_apis TEXT", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN gateway_enabled INTEGER NOT NULL DEFAULT 0", []);
+
+    // The `gateway_enabled` derivation from legacy `wire_api` values is applied once per
+    // app launch by `migrate_gateway_enabled_derivation()` (called from `lib.rs` setup),
+    // NOT here: running it on every connection would silently re-enable the switch after
+    // the user turned it off while a legacy `wire_api` value was still on record.
     Ok(conn)
+}
+
+/// Derives the per-provider `gateway_enabled` switch from legacy protocol fields.
+///
+/// Runs once per app launch (from `lib.rs` setup, after schema migration). A provider
+/// whose `wire_api` is a legacy Chat value — or whose `model_wire_apis` map contains a
+/// Chat entry — gets the switch turned on; everything else keeps its stored value.
+/// Re-running this on every DB connection would resurrect a switch the user turned off
+/// in the UI whenever Python (frozen, unaware of the column) or hand-edited SQL had
+/// written a legacy `wire_api` value.
+pub fn migrate_gateway_enabled_derivation() -> Result<(), String> {
+    let conn = get_connection()?;
+    conn.execute(
+        concat!(
+            "UPDATE providers SET gateway_enabled = 1 ",
+            "WHERE lower(trim(wire_api)) IN ('chat', 'chat_completions', 'chat-completions', 'completions', 'completion') ",
+            // Match any JSON-string value equal to `chat` inside the serialized map
+            // (`"chat"` with both quotes); the previous prefix pattern could never
+            // match a JSON object, which always starts with `{`.
+            r#"OR model_wire_apis LIKE '%"chat"%'"#
+        ),
+        [],
+    )
+    .map_err(|e| format!("Failed to derive gateway_enabled from legacy wire_api: {e}"))?;
+    Ok(())
 }
 
 /// Ingests an `auth.json` file into SQLite and the profile sandbox.
@@ -618,8 +681,13 @@ pub fn list_accounts_with_quota() -> Result<Vec<AccountData>, String> {
                 .clone()
                 .or_else(|| email.clone())
                 .unwrap_or_else(|| {
-                    if user_id.len() > 18 {
-                        format!("{}...{}", &user_id[..8], &user_id[user_id.len() - 6..])
+                    // Slice by chars: a byte-range slice would panic on a multi-byte
+                    // `user_id` (not expected from OpenAI, but not worth crashing over).
+                    let chars: Vec<char> = user_id.chars().collect();
+                    if chars.len() > 18 {
+                        let head: String = chars[..8].iter().collect();
+                        let tail: String = chars[chars.len() - 6..].iter().collect();
+                        format!("{head}...{tail}")
                     } else {
                         user_id.clone()
                     }
@@ -923,4 +991,286 @@ pub fn get_history(target: &str, limit: u32) -> Result<Vec<SnapshotRecord>, Stri
         results.push(r.map_err(|e| e.to_string())?);
     }
     Ok(results)
+}
+
+/// Lists all third-party providers from SQLite database.
+pub fn list_providers() -> Result<Vec<super::provider::Provider>, String> {
+    let conn = get_connection()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, base_url, wire_api, active_model, models_json,
+                    notes, custom_config_toml, custom_auth_json, key_masked, created_at, updated_at,
+                    context_window, model_context_windows, reasoning_levels, model_reasoning_levels,
+                    model_wire_apis, gateway_enabled
+             FROM providers
+             ORDER BY updated_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let models_raw: String = row.get(5)?;
+            let models: Vec<String> = serde_json::from_str(&models_raw).unwrap_or_default();
+            let context_window: Option<u64> = row.get(12).unwrap_or(None);
+            let model_contexts_raw: Option<String> = row.get(13).unwrap_or(None);
+            let model_context_windows = model_contexts_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let reasoning_levels_raw: Option<String> = row.get(14).unwrap_or(None);
+            let reasoning_levels = reasoning_levels_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let model_reasoning_raw: Option<String> = row.get(15).unwrap_or(None);
+            let model_reasoning_levels = model_reasoning_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let model_wire_raw: Option<String> = row.get(16).unwrap_or(None);
+            let model_wire_apis = model_wire_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let gateway_enabled: bool = row.get::<_, Option<bool>>(17)?.unwrap_or(false);
+            Ok(super::provider::Provider {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                base_url: row.get(2)?,
+                wire_api: row.get(3)?,
+                active_model: row.get(4)?,
+                models,
+                context_window,
+                model_context_windows,
+                reasoning_levels,
+                model_reasoning_levels,
+                model_wire_apis,
+                gateway_enabled,
+                notes: row.get(6)?,
+                custom_config_toml: row.get(7)?,
+                custom_auth_json: row.get(8)?,
+                key_masked: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut list = Vec::new();
+    for r in rows {
+        list.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(list)
+}
+
+/// Retrieves a single third-party provider by ID.
+pub fn get_provider(id: &str) -> Result<Option<super::provider::Provider>, String> {
+    let conn = get_connection()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, base_url, wire_api, active_model, models_json,
+                    notes, custom_config_toml, custom_auth_json, key_masked, created_at, updated_at,
+                    context_window, model_context_windows, reasoning_levels, model_reasoning_levels,
+                    model_wire_apis, gateway_enabled
+             FROM providers
+             WHERE id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut rows = stmt
+        .query_map(params![id], |row| {
+            let models_raw: String = row.get(5)?;
+            let models: Vec<String> = serde_json::from_str(&models_raw).unwrap_or_default();
+            let context_window: Option<u64> = row.get(12).unwrap_or(None);
+            let model_contexts_raw: Option<String> = row.get(13).unwrap_or(None);
+            let model_context_windows = model_contexts_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let reasoning_levels_raw: Option<String> = row.get(14).unwrap_or(None);
+            let reasoning_levels = reasoning_levels_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let model_reasoning_raw: Option<String> = row.get(15).unwrap_or(None);
+            let model_reasoning_levels = model_reasoning_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let model_wire_raw: Option<String> = row.get(16).unwrap_or(None);
+            let model_wire_apis = model_wire_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let gateway_enabled: bool = row.get::<_, Option<bool>>(17)?.unwrap_or(false);
+            Ok(super::provider::Provider {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                base_url: row.get(2)?,
+                wire_api: row.get(3)?,
+                active_model: row.get(4)?,
+                models,
+                context_window,
+                model_context_windows,
+                reasoning_levels,
+                model_reasoning_levels,
+                model_wire_apis,
+                gateway_enabled,
+                notes: row.get(6)?,
+                custom_config_toml: row.get(7)?,
+                custom_auth_json: row.get(8)?,
+                key_masked: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    if let Some(res) = rows.next() {
+        Ok(Some(res.map_err(|e| e.to_string())?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Inserts or updates a third-party provider record in SQLite.
+pub fn upsert_provider(
+    provider: &super::provider::Provider,
+    key_sha256: &str,
+) -> Result<(), String> {
+    let conn = get_connection()?;
+    let models_json = serde_json::to_string(&provider.models).unwrap_or_else(|_| "[]".to_string());
+    let model_contexts_json = serde_json::to_string(
+        &provider.model_context_windows.clone().unwrap_or_default(),
+    )
+    .unwrap_or_else(|_| "{}".to_string());
+    let sorted_reasoning_levels = provider.reasoning_levels.as_ref().map(|v| {
+        let mut cloned = v.clone();
+        super::provider::sort_reasoning_levels(&mut cloned);
+        cloned
+    });
+    let reasoning_levels_json = sorted_reasoning_levels
+        .as_ref()
+        .and_then(|v| serde_json::to_string(v).ok());
+
+    let sorted_model_reasoning = provider.model_reasoning_levels.as_ref().map(|m| {
+        let mut map = std::collections::HashMap::new();
+        for (k, v) in m {
+            let mut cloned = v.clone();
+            super::provider::sort_reasoning_levels(&mut cloned);
+            map.insert(k.clone(), cloned);
+        }
+        map
+    });
+    let model_reasoning_json = sorted_model_reasoning
+        .as_ref()
+        .and_then(|m| serde_json::to_string(m).ok());
+    // Normalize every override so a legacy `chat_completions` value can never be stored
+    // and later mistaken for a third protocol.
+    let normalized_model_wire = provider.model_wire_apis.as_ref().map(|m| {
+        let mut map = std::collections::HashMap::new();
+        for (k, v) in m {
+            let slug = k.trim();
+            if slug.is_empty() {
+                continue;
+            }
+            map.insert(slug.to_string(), super::protocol_proxy::normalize_wire_api(v));
+        }
+        map
+    });
+    let model_wire_apis_json = normalized_model_wire
+        .as_ref()
+        .filter(|m| !m.is_empty())
+        .and_then(|m| serde_json::to_string(m).ok());
+    let context_window_val = provider.context_window.unwrap_or(super::provider::DEFAULT_MIN_CONTEXT_WINDOW);
+
+    conn.execute(
+        "INSERT INTO providers (
+            id, name, base_url, wire_api, active_model, models_json,
+            context_window, model_context_windows, reasoning_levels, model_reasoning_levels,
+            model_wire_apis, gateway_enabled,
+            notes, custom_config_toml, custom_auth_json, key_masked, key_sha256, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            base_url = excluded.base_url,
+            wire_api = excluded.wire_api,
+            active_model = excluded.active_model,
+            models_json = excluded.models_json,
+            context_window = excluded.context_window,
+            model_context_windows = excluded.model_context_windows,
+            reasoning_levels = excluded.reasoning_levels,
+            model_reasoning_levels = excluded.model_reasoning_levels,
+            model_wire_apis = excluded.model_wire_apis,
+            gateway_enabled = excluded.gateway_enabled,
+            notes = excluded.notes,
+            custom_config_toml = excluded.custom_config_toml,
+            custom_auth_json = excluded.custom_auth_json,
+            key_masked = excluded.key_masked,
+            key_sha256 = CASE WHEN excluded.key_sha256 = '' THEN providers.key_sha256 ELSE excluded.key_sha256 END,
+            updated_at = excluded.updated_at",
+        params![
+            provider.id,
+            provider.name,
+            provider.base_url,
+            provider.wire_api,
+            provider.active_model,
+            models_json,
+            context_window_val,
+            model_contexts_json,
+            reasoning_levels_json,
+            model_reasoning_json,
+            model_wire_apis_json,
+            provider.gateway_enabled,
+            provider.notes,
+            provider.custom_config_toml,
+            provider.custom_auth_json,
+            provider.key_masked,
+            key_sha256,
+            provider.created_at,
+            provider.updated_at
+        ],
+    )
+    .map_err(|e| format!("Failed to upsert provider in SQLite: {e}"))?;
+
+    Ok(())
+}
+
+/// Returns the stored SHA256 hash of a provider's API key, or `None` when unset.
+///
+/// Used to preserve the existing key fingerprint when a provider is edited without
+/// supplying a new plaintext key.
+///
+/// # Errors
+///
+/// Returns `Err` if the database cannot be opened or queried.
+pub fn get_provider_key_hash(id: &str) -> Result<Option<String>, String> {
+    let conn = get_connection()?;
+    let mut stmt = conn
+        .prepare("SELECT key_sha256 FROM providers WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query_map(params![id], |row| row.get::<_, Option<String>>(0))
+        .map_err(|e| e.to_string())?;
+    if let Some(res) = rows.next() {
+        let value = res.map_err(|e| e.to_string())?;
+        Ok(value.filter(|s| !s.is_empty()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Updates the active model for a provider.
+pub fn update_provider_active_model(id: &str, model: &str) -> Result<(), String> {
+    let conn = get_connection()?;
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    conn.execute(
+        "UPDATE providers SET active_model = ?1, updated_at = ?2 WHERE id = ?3",
+        params![model, now, id],
+    )
+    .map_err(|e| format!("Failed to update provider active model: {e}"))?;
+    Ok(())
+}
+
+/// Deletes a provider from database and purges its sandbox files.
+pub fn delete_provider(id: &str) -> Result<bool, String> {
+    let conn = get_connection()?;
+    let count = conn
+        .execute("DELETE FROM providers WHERE id = ?1", params![id])
+        .map_err(|e| format!("Failed to delete provider: {e}"))?;
+
+    let _ = super::provider::delete_provider_files(id);
+    Ok(count > 0)
 }

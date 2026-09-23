@@ -33,6 +33,7 @@ docs/
 ### 权威入口对照
 - 关于“项目支持哪些命令与特性”：以 [PROJECT.md](file:///d:/Code/codexq/docs/PROJECT.md) 为准。
 - 关于“SQLite 表结构、RPC 消息格式、Profile 沙箱隔离原理”：以 [architecture.md](file:///d:/Code/codexq/docs/architecture.md) 为准。
+- 关于“第三方服务商接入、运行时槽位切换与 `config.toml` 无损注入协议”：以 [architecture.md](file:///d:/Code/codexq/docs/architecture.md) 第 8 章为准。
 - 关于“当前在做什么、待办是什么”：以 [work/current.md](file:///d:/Code/codexq/docs/work/current.md) 为准。
 - 关于“为什么采用纯标准库 / 为什么采用 stdio RPC”：以 [work/history.md](file:///d:/Code/codexq/docs/work/history.md) 为准。
 
