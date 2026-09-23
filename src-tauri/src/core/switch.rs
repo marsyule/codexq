@@ -4,15 +4,19 @@ use std::fs;
 use std::path::PathBuf;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use toml_edit::{DocumentMut, Item, Table, Value};
+use toml_edit::{DocumentMut, Item, Table, TableLike, Value};
 
 use super::auth::{
     atomic_write, ensure_host_codex_config, is_access_token_expired, read_auth_file,
     refresh_oauth_token_for_profile,
 };
-use super::db::{auto_sync_current, get_connection, get_provider, resolve_account, update_provider_active_model};
+use super::db::{
+    auto_sync_current, get_connection, get_provider, list_providers, resolve_account,
+    update_provider_active_model,
+};
 use super::paths::{active_auth_path, backups_dir, codex_home};
 use super::process::restart_codex;
+use super::protocol_proxy::{self, CODEX_WIRE_API};
 use super::provider::{generate_model_catalog, read_provider_key};
 
 /// Maximum number of `~/.codexq/backups/<ts>_<reason>` snapshots retained on disk.
@@ -24,6 +28,193 @@ const MAX_RUNTIME_SNAPSHOTS: usize = 20;
 /// Returns true when the given `model_provider` id refers to the built-in official provider.
 fn is_official_provider_id(id: &str) -> bool {
     matches!(id.trim().to_ascii_lowercase().as_str(), "openai" | "")
+}
+
+/// Rewrites every `[model_providers.*]` table into a shape Codex will actually load.
+///
+/// Codex validates **all** provider tables at startup, including tables no longer
+/// referenced by any profile or `--model`. A single legacy `wire_api = "chat"` — or an
+/// empty `name` — therefore fails deserialization for the **whole** config, which
+/// disables every command while `codex doctor` still reports `config.load: fail`.
+///
+/// Normalization is consequently unconditional and full-sweep: there is no prior
+/// behaviour to preserve, because such a config never loaded in the first place.
+/// See AGENTS.md §3 invariant 5.
+fn normalize_provider_tables(doc: &mut DocumentMut) {
+    let Some(item) = doc.get_mut("model_providers") else {
+        return;
+    };
+
+    match item {
+        Item::Table(providers) => {
+            for (id, entry) in providers.iter_mut() {
+                if let Some(table) = entry.as_table_like_mut() {
+                    normalize_provider_table(id.get(), table);
+                }
+            }
+        }
+        // `model_providers = { a = { ... } }` — not produced by CodexQ, but a user may
+        // have hand-written it, and Codex validates it just the same.
+        Item::Value(Value::InlineTable(providers)) => {
+            for (id, entry) in providers.iter_mut() {
+                if let Value::InlineTable(table) = entry {
+                    normalize_provider_table(id.get(), table);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Normalizes one provider table: `wire_api` must be `"responses"`, `name` must be non-empty.
+fn normalize_provider_table(id: &str, table: &mut dyn TableLike) {
+    if table.get("wire_api").and_then(|item| item.as_str()) != Some(CODEX_WIRE_API) {
+        log::warn!("config.toml: normalizing unsupported wire_api on provider '{id}'");
+        table.insert("wire_api", toml_edit::value(CODEX_WIRE_API));
+    }
+
+    let has_name = table
+        .get("name")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .is_some_and(|name| !name.is_empty());
+    if !has_name {
+        log::warn!("config.toml: backfilling missing provider name on '{id}'");
+        table.insert("name", toml_edit::value("Custom"));
+    }
+}
+
+/// Points an existing `<id>` provider table at `base_url` with a Codex-legal `wire_api`.
+///
+/// Used when an already-active provider is edited. Adding or removing a per-model protocol
+/// override changes whether that provider must go through the gateway, and leaving the old
+/// address in place would silently keep the previous protocol in effect until the user
+/// switched away and back.
+///
+/// A no-op when the provider table is absent, so a user-authored `custom_config_toml` that
+/// replaced the standard table cannot be resurrected here.
+///
+/// # Arguments
+///
+/// * `doc` - Parsed `config.toml`.
+/// * `id` - Provider table key to update.
+/// * `base_url` - Address Codex should use, already resolved by
+///   [`protocol_proxy::routed_base_url`].
+pub fn apply_provider_routing(doc: &mut DocumentMut, id: &str, base_url: &str) {
+    let Some(item) = doc.get_mut("model_providers") else {
+        return;
+    };
+    match item {
+        Item::Table(providers) => {
+            if let Some(table) = providers
+                .get_mut(id)
+                .and_then(|entry| entry.as_table_like_mut())
+            {
+                set_provider_routing(table, base_url);
+            }
+        }
+        Item::Value(Value::InlineTable(providers)) => {
+            if let Some(Value::InlineTable(table)) = providers.get_mut(id) {
+                set_provider_routing(table, base_url);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Writes `base_url` and the Codex-legal `wire_api` into one provider table.
+fn set_provider_routing(table: &mut dyn TableLike, base_url: &str) {
+    table.insert("base_url", toml_edit::value(base_url));
+    table.insert("wire_api", toml_edit::value(CODEX_WIRE_API));
+}
+
+/// Leaves an inactive provider id available to historical desktop sessions without its secrets.
+pub(super) fn deactivate_provider_entry(
+    doc: &mut DocumentMut,
+    id: &str,
+    name: Option<&str>,
+) -> bool {
+    if name.is_some() && doc.get("model_providers").is_none() {
+        doc["model_providers"] = Item::Table(Table::new());
+    }
+    let Some(providers) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_like_mut())
+    else {
+        return false;
+    };
+
+    if let Some(name) = name {
+        let name = name
+            .trim()
+            .is_empty()
+            .then_some("Inactive provider")
+            .unwrap_or(name.trim());
+        if let Some(table) = providers
+            .get_mut(id)
+            .and_then(|item| item.as_table_like_mut())
+        {
+            table.clear();
+            table.insert("name", toml_edit::value(name));
+            table.insert("base_url", toml_edit::value("http://127.0.0.1:1/v1"));
+            table.insert("wire_api", toml_edit::value(CODEX_WIRE_API));
+        } else {
+            let mut table = Table::new();
+            table["name"] = toml_edit::value(name);
+            table["base_url"] = toml_edit::value("http://127.0.0.1:1/v1");
+            table["wire_api"] = toml_edit::value(CODEX_WIRE_API);
+            providers.insert(id, Item::Table(table));
+        }
+        true
+    } else {
+        providers.remove(id).is_some()
+    }
+}
+
+/// Restores metadata-only provider tables for saved desktop sessions after an upgrade.
+///
+/// The active third-party provider remains untouched. Inactive providers are represented by
+/// unreachable local endpoints, with no credentials or user-supplied custom fields.
+///
+/// # Errors
+///
+/// Returns Err if provider metadata cannot be read, the config cannot be parsed, or the
+/// updated config cannot be written.
+pub fn ensure_inactive_provider_stubs() -> Result<(), String> {
+    let config_path = codex_home().join("config.toml");
+    if !config_path.is_file() {
+        return Ok(());
+    }
+
+    let providers = list_providers()?;
+    if providers.is_empty() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&config_path).map_err(|error| error.to_string())?;
+    let mut doc = content.parse::<DocumentMut>().map_err(|error| error.to_string())?;
+    let active_id = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    let mut changed = false;
+
+    for provider in providers {
+        if active_id.as_deref() == Some(provider.id.as_str())
+            || matches!(provider.id.as_str(), "openai" | "ollama" | "lmstudio")
+        {
+            continue;
+        }
+        changed |= deactivate_provider_entry(&mut doc, &provider.id, Some(&provider.name));
+    }
+
+    if changed {
+        normalize_provider_tables(&mut doc);
+        atomic_write(&config_path, doc.to_string().as_bytes())?;
+    }
+    Ok(())
 }
 
 /// Prunes the oldest runtime snapshots so at most `keep` directories remain.
@@ -202,6 +393,17 @@ pub async fn switch_to_provider(
     // 3. Load provider & secret key
     let prov = get_provider(provider_id)?
         .ok_or_else(|| format!("Provider '{provider_id}' not found"))?;
+
+    // `openai` / `ollama` / `lmstudio` are Codex built-ins: overriding one makes Codex
+    // reject the entire config at load. Refuse before touching the filesystem.
+    if protocol_proxy::is_reserved_provider_id(&prov.id) {
+        return Err(format!(
+            "Provider id '{}' collides with a Codex built-in provider id. Codex rejects a \
+             config.toml that overrides it, so the switch was aborted. Rename the provider first.",
+            prov.id
+        ));
+    }
+
     let api_key = read_provider_key(provider_id)?;
 
     let chosen_model = model_override
@@ -213,16 +415,58 @@ pub async fn switch_to_provider(
         let _ = update_provider_active_model(provider_id, &chosen_model);
     }
 
-    // 4. Generate the provider model catalog artifact. NOTE: it is intentionally NOT
-    // referenced from config.toml via a root-level `model_catalog_json` key, because
-    // Codex CLI >= 0.149.1 rejects that undeclared key and fails to load the config.
-    let _ = generate_model_catalog(
+    // 4. Generate the provider model catalog artifact.
+    let catalog_path = generate_model_catalog(
         provider_id,
         &chosen_model,
         &prov.models,
         prov.context_window,
         prov.model_context_windows.as_ref(),
+        prov.reasoning_levels.as_deref(),
+        prov.model_reasoning_levels.as_ref(),
     )?;
+
+    // 4.5. Resolve the effective base_url and protocol.
+    //
+    // Codex removed the chat wire protocol entirely (openai/codex discussion #7782), so
+    // `wire_api` written into config.toml is ALWAYS "responses". Providers that only
+    // speak Chat Completions are routed through the loopback protocol gateway instead;
+    // see `core/protocol_proxy` and AGENTS.md §3 invariant 5.
+    let uses_custom_config = prov
+        .custom_config_toml
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+
+    let mut gateway_note = String::new();
+    let effective_base_url = if uses_custom_config {
+        // A user-authored provider table owns its own base_url; rewriting it would
+        // silently discard their configuration.
+        if prov.needs_gateway() {
+            gateway_note =
+                " [custom config.toml kept as-is: the protocol gateway was NOT applied]".to_string();
+        }
+        prov.base_url.trim().to_string()
+    } else {
+        let (base_url, warning) = protocol_proxy::routed_base_url(&prov).await;
+        match warning {
+            // Never write a base_url that cannot be reached. Stay on the direct address and
+            // report why, so the failure is diagnosable instead of surfacing as an
+            // unexplained connection refusal.
+            Some(err) => {
+                gateway_note = format!(
+                    " [WARNING: protocol gateway unavailable, provider left on a direct \
+                     connection which its Chat Completions models cannot serve: {err}]"
+                );
+                log::warn!("switch_to_provider: {err}");
+            }
+            None if base_url != prov.base_url.trim() => {
+                gateway_note = format!(" [upstream routed via the local protocol gateway at {base_url}]");
+            }
+            None => {}
+        }
+        base_url
+    };
 
     // 5. Update ~/.codex/config.toml with toml_edit preserving existing user configs
     let host_config_path = codex_home().join("config.toml");
@@ -234,13 +478,12 @@ pub async fn switch_to_provider(
 
     let mut doc: DocumentMut = config_content.parse().unwrap_or_default();
 
-    // Always purge any historical residual of the unsupported root-level catalog key.
-    doc.remove("model_catalog_json");
-
     // Set model
     doc["model"] = Item::Value(Value::from(chosen_model.as_str()));
     // Set model_provider
     doc["model_provider"] = Item::Value(Value::from(provider_id));
+    // Point Codex at the active provider's model list. Codex resolves this at startup.
+    doc["model_catalog_json"] = Item::Value(Value::from(catalog_path));
 
     // Merge custom_config_toml if provided; otherwise standard provider injection
     if let Some(custom_toml) = prov.custom_config_toml.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -257,14 +500,16 @@ pub async fn switch_to_provider(
 
         let mut provider_table = Table::new();
         provider_table["name"] = Item::Value(Value::from(prov.name.as_str()));
-        provider_table["base_url"] = Item::Value(Value::from(prov.base_url.as_str()));
-        provider_table["wire_api"] = Item::Value(Value::from(prov.wire_api.as_str()));
+        provider_table["base_url"] = Item::Value(Value::from(effective_base_url.as_str()));
+        provider_table["wire_api"] = Item::Value(Value::from(CODEX_WIRE_API));
         provider_table["experimental_bearer_token"] = Item::Value(Value::from(api_key.as_str()));
 
         if let Some(mp) = doc.get_mut("model_providers").and_then(|i| i.as_table_like_mut()) {
             mp.insert(provider_id, Item::Table(provider_table));
         }
     }
+
+    normalize_provider_tables(&mut doc);
 
     atomic_write(&host_config_path, doc.to_string().as_bytes())?;
 
@@ -276,6 +521,7 @@ pub async fn switch_to_provider(
     }
 
     let mut msg = format!("Switched active provider to '{}' (model: {})", prov.name, chosen_model);
+    msg.push_str(&gateway_note);
 
     if restart {
         match restart_codex(true, true).await {
@@ -345,7 +591,6 @@ pub async fn switch_account(target: &str, restart: bool) -> Result<String, Strin
     //
     // Only drop `model_provider` / `model` when they point at a third-party provider; a
     // user-authored `model_provider = "openai"` or a standalone `model` must be preserved.
-    // The unsupported root-level `model_catalog_json` residual is always purged.
     let host_config_path = codex_home().join("config.toml");
     if host_config_path.is_file() {
         if let Ok(content) = fs::read_to_string(&host_config_path) {
@@ -364,18 +609,26 @@ pub async fn switch_account(target: &str, restart: bool) -> Result<String, Strin
                             changed = true;
                         }
                     }
-                    // Drop the injected provider table; it holds the plaintext bearer token.
-                    if let Some(mp) = doc
-                        .get_mut("model_providers")
-                        .and_then(|i| i.as_table_like_mut())
-                    {
-                        if mp.remove(pid.as_str()).is_some() {
-                            changed = true;
-                        }
-                    }
+                    // Keep a harmless declaration so existing Codex Desktop threads can still
+                    // resolve their provider id, but remove every active-provider setting and
+                    // credential. The unroutable loopback URL prevents stale threads from
+                    // accidentally sending requests to a third party after switching to OpenAI.
+                    let inactive_name = get_provider(&pid)
+                        .ok()
+                        .flatten()
+                        .map(|provider| provider.name);
+                    changed |= deactivate_provider_entry(
+                        &mut doc,
+                        pid.as_str(),
+                        inactive_name.as_deref(),
+                    );
                 }
 
-                if doc.remove("model_catalog_json").is_some() {
+                let remove_catalog = doc
+                    .get("model_catalog_json")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(is_codexq_model_catalog_path);
+                if remove_catalog && doc.remove("model_catalog_json").is_some() {
                     changed = true;
                 }
 
@@ -385,6 +638,9 @@ pub async fn switch_account(target: &str, restart: bool) -> Result<String, Strin
             }
         }
     }
+
+    // Official mode never needs the protocol gateway.
+    super::protocol_proxy::stop();
 
     // 6. Update last_seen_at in DB
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -406,4 +662,12 @@ pub async fn switch_account(target: &str, restart: bool) -> Result<String, Strin
     }
 
     Ok(msg)
+}
+
+/// Returns whether a model catalog path is managed by CodexQ.
+pub(crate) fn is_codexq_model_catalog_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    normalized.contains("/model-catalogs/codexq-")
+        || normalized.starts_with("model-catalogs/codexq-")
+        || normalized.contains("/.codexq/providers/")
 }

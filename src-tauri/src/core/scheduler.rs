@@ -141,6 +141,15 @@ pub fn save_account_alarm(alarm_val: Value) -> Result<AccountAlarm, String> {
         .trim()
         .to_string();
 
+    // Normalize to the zero-padded HH:MM the background ticker matches against.
+    // `parse_time_to_minutes` accepts "9:00", but the ticker compares strings against
+    // `format!("{:02}:{:02}")` — an unpadded value would pass validation here and then
+    // silently never fire. This also re-validates hour/minute ranges.
+    let time_of_day = {
+        let minutes = parse_time_to_minutes(&time_of_day)?;
+        format!("{:02}:{:02}", minutes / 60, minutes % 60)
+    };
+
     let id = alarm_val
         .get("id")
         .and_then(|v| v.as_str())

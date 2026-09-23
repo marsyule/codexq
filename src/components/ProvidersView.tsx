@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Plus, Search, Server } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
+import { Plus, Search, Server, FolderOpen } from 'lucide-react';
 import type { ProviderData, ToastPayload, ActiveRuntimeMode } from '../types';
 import { ProviderCard } from './ProviderCard';
 import { AddProviderModal } from './AddProviderModal';
@@ -83,6 +84,14 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
     }
   };
 
+  const handleOpenCatalogDir = async () => {
+    try {
+      await invoke('open_model_catalog', { providerId: null });
+    } catch (err: any) {
+      showToast(String(err), 'error');
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Top action bar: Search & Add Provider */}
@@ -98,14 +107,26 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
           />
         </div>
 
-        <button
-          type="button"
-          onClick={handleOpenAdd}
-          className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs shadow-blue-600/20 transition-all active:scale-[0.99] shrink-0"
-        >
-          <Plus className="w-4 h-4" />
-          <span>{t('providers.addBtn', 'Add Provider')}</span>
-        </button>
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <button
+            type="button"
+            onClick={handleOpenCatalogDir}
+            title={t('providers.openCatalogFolder', '打开模型目录')}
+            className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl shadow-2xs transition-all active:scale-[0.99] shrink-0 cursor-pointer"
+          >
+            <FolderOpen className="w-3.5 h-3.5 text-slate-500" />
+            <span>{t('providers.openCatalogFolder', '打开模型目录')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleOpenAdd}
+            className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs shadow-blue-600/20 transition-all active:scale-[0.99] shrink-0 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>{t('providers.addBtn', 'Add Provider')}</span>
+          </button>
+        </div>
       </div>
 
       {/* Grid of Providers */}

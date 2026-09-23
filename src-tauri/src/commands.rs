@@ -498,6 +498,12 @@ pub struct SaveProviderPayload {
     pub models: Vec<String>,
     pub context_window: Option<u64>,
     pub model_context_windows: Option<std::collections::HashMap<String, u64>>,
+    pub reasoning_levels: Option<Vec<String>>,
+    pub model_reasoning_levels: Option<std::collections::HashMap<String, Vec<String>>>,
+    /// Per-model upstream protocol overrides (`model slug -> "responses" | "chat"`).
+    pub model_wire_apis: Option<std::collections::HashMap<String, String>>,
+    /// Explicit local gateway master switch from the provider editor.
+    pub gateway_enabled: Option<bool>,
     pub notes: Option<String>,
     pub custom_config_toml: Option<String>,
     pub custom_auth_json: Option<String>,
@@ -514,6 +520,13 @@ pub async fn list_providers() -> Result<Value, String> {
 /// Saves or updates a third-party provider and its secret API key.
 #[tauri::command]
 pub async fn save_provider(payload: SaveProviderPayload) -> Result<Value, String> {
+    let display_name = payload.name.trim().to_string();
+    // Codex rejects a config whose provider table has an empty `name`, so refuse to
+    // create one rather than writing a config that bricks every Codex command.
+    if display_name.is_empty() {
+        return Err("Provider name must not be empty".to_string());
+    }
+
     let id = match payload.id {
         Some(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => {
@@ -527,10 +540,14 @@ pub async fn save_provider(payload: SaveProviderPayload) -> Result<Value, String
             if slug.is_empty() {
                 format!("provider-{}", chrono::Utc::now().timestamp_millis())
             } else {
-                // Never silently clobber an existing provider that slugifies to the same id.
+                // Never silently clobber an existing provider that slugifies to the same
+                // id, and never claim a Codex-reserved id (`openai` / `ollama` /
+                // `lmstudio`): overriding one makes Codex reject the whole config.
                 let mut candidate = slug.clone();
                 let mut suffix = 2u32;
-                while crate::core::db::get_provider(&candidate)?.is_some() {
+                while crate::core::protocol_proxy::is_reserved_provider_id(&candidate)
+                    || crate::core::db::get_provider(&candidate)?.is_some()
+                {
                     candidate = format!("{slug}-{suffix}");
                     suffix += 1;
                 }
@@ -567,13 +584,35 @@ pub async fn save_provider(payload: SaveProviderPayload) -> Result<Value, String
 
     let provider = crate::core::provider::Provider {
         id: id.clone(),
-        name: payload.name.trim().to_string(),
+        name: display_name,
         base_url: payload.base_url.trim().to_string(),
-        wire_api: payload.wire_api.unwrap_or_else(|| "responses".to_string()),
+        // Normalized to the internal `responses` / `chat` domain. The upstream protocol
+        // is never written into Codex's config; Chat Completions upstreams are served by
+        // the loopback protocol gateway instead. See AGENTS.md §3 invariant 5.
+        wire_api: crate::core::protocol_proxy::normalize_wire_api(
+            payload.wire_api.as_deref().unwrap_or("responses"),
+        ),
         active_model,
         models,
         context_window: payload.context_window,
         model_context_windows: payload.model_context_windows,
+        reasoning_levels: payload.reasoning_levels,
+        model_reasoning_levels: payload.model_reasoning_levels,
+        // Per-model protocol overrides, normalized into the `responses` / `chat` domain so
+        // a legacy value like `chat_completions` can never be stored as a third protocol.
+        model_wire_apis: payload.model_wire_apis.map(|m| {
+            m.into_iter()
+                .filter_map(|(model, api)| {
+                    let slug = model.trim().to_string();
+                    if slug.is_empty() {
+                        return None;
+                    }
+                    Some((slug, crate::core::protocol_proxy::normalize_wire_api(&api)))
+                })
+                .collect::<std::collections::HashMap<String, String>>()
+        })
+        .filter(|m| !m.is_empty()),
+        gateway_enabled: payload.gateway_enabled.unwrap_or(false),
         notes: payload.notes.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         custom_config_toml: payload.custom_config_toml.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         custom_auth_json: payload.custom_auth_json.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
@@ -584,15 +623,15 @@ pub async fn save_provider(payload: SaveProviderPayload) -> Result<Value, String
 
     crate::core::db::upsert_provider(&provider, &key_sha256)?;
 
-    // Generate/refresh the provider model catalog artifact. It is deliberately NOT wired
-    // into config.toml via a root-level `model_catalog_json` key, which Codex CLI >= 0.149.1
-    // rejects as an undeclared config key.
-    let _ = crate::core::provider::generate_model_catalog(
+    // Generate/refresh the provider model catalog artifact.
+    let catalog_path = crate::core::provider::generate_model_catalog(
         &id,
         &provider.active_model,
         &provider.models,
         provider.context_window,
         provider.model_context_windows.as_ref(),
+        provider.reasoning_levels.as_deref(),
+        provider.model_reasoning_levels.as_ref(),
     )?;
 
     // If this provider is currently the active provider in ~/.codex/config.toml, sync config.toml
@@ -604,7 +643,32 @@ pub async fn save_provider(payload: SaveProviderPayload) -> Result<Value, String
             if host_config_path.is_file() {
                 if let Ok(content) = std::fs::read_to_string(&host_config_path) {
                     if let Ok(mut doc) = content.parse::<toml_edit::DocumentMut>() {
-                        doc.remove("model_catalog_json");
+                        // A user-authored custom_config_toml owns its own base_url; the
+                        // gateway must not take over. Same rule as `switch_to_provider` —
+                        // without this guard, editing the active provider would silently
+                        // rewrite the user's hand-written `base_url`.
+                        let uses_custom_config = provider
+                            .custom_config_toml
+                            .as_deref()
+                            .map(str::trim)
+                            .is_some_and(|value| !value.is_empty());
+
+                        if !uses_custom_config {
+                            // Re-resolve routing before writing. Editing a provider can change
+                            // whether it needs the gateway (adding or clearing a per-model
+                            // `model_wire_apis` entry does exactly that), and a stale `base_url`
+                            // would silently keep the previous protocol in effect until the user
+                            // switched away and back.
+                            let (routed, routing_warning) =
+                                crate::core::protocol_proxy::routed_base_url(&provider).await;
+                            if let Some(err) = routing_warning {
+                                log::warn!("save_provider: {err}");
+                            }
+                            crate::core::switch::apply_provider_routing(&mut doc, &id, &routed);
+                        }
+
+                        doc["model_catalog_json"] =
+                            toml_edit::Item::Value(toml_edit::Value::from(catalog_path));
                         doc["model"] =
                             toml_edit::Item::Value(toml_edit::Value::from(provider.active_model.as_str()));
                         let _ = crate::core::auth::atomic_write(&host_config_path, doc.to_string().as_bytes());
@@ -669,4 +733,193 @@ pub async fn switch_to_provider(
 pub async fn get_active_runtime_mode() -> Result<Value, String> {
     let mode = crate::core::switch::get_active_runtime_mode()?;
     serde_json::to_value(mode).map_err(|e| e.to_string())
+}
+
+/// Returns the loopback protocol gateway status without starting it.
+#[tauri::command]
+pub async fn get_gateway_status() -> Result<Value, String> {
+    serde_json::to_value(crate::core::protocol_proxy::status()).map_err(|e| e.to_string())
+}
+
+/// Restarts the protocol gateway so a changed port takes effect.
+///
+/// Does not re-run a provider switch: the caller decides whether to reactivate the
+/// active provider afterwards.
+#[tauri::command]
+pub async fn restart_gateway() -> Result<Value, String> {
+    let base_url = crate::core::protocol_proxy::restart().await?;
+    Ok(serde_json::json!({ "base_url": base_url }))
+}
+
+/// Probes whether one loopback port can be bound, without persisting anything.
+///
+/// Backs the port field's "check" button so the user can validate a port before applying it,
+/// and so an occupied port is explained instead of surfacing later as a mysterious gateway
+/// outage.
+///
+/// # Arguments
+///
+/// * `port` - Loopback port to probe.
+///
+/// # Errors
+///
+/// Returns `Err` if the report cannot be serialized.
+#[tauri::command]
+pub async fn check_gateway_port(port: u16) -> Result<Value, String> {
+    let state = crate::core::protocol_proxy::probe_port(port);
+    Ok(serde_json::json!({
+        "port": port,
+        "state": state.as_str(),
+    }))
+}
+
+/// Applies a new loopback gateway port and repoints Codex at it.
+///
+/// The only supported way to change the port: persists `proxy.port`, restarts the listener and
+/// rewrites the active provider's `base_url`, rolling back on failure.
+///
+/// # Arguments
+///
+/// * `port` - New loopback port, `1..=65535`.
+///
+/// # Errors
+///
+/// Returns `Err` if the port is `0`, `CODEXQ_PROXY_PORT` overrides it, the port is occupied, or
+/// the listener / `config.toml` cannot be updated (the port is rolled back first).
+#[tauri::command]
+pub async fn set_gateway_port(port: u16) -> Result<Value, String> {
+    let status = crate::core::protocol_proxy::set_gateway_port(port).await?;
+    serde_json::to_value(status).map_err(|e| e.to_string())
+}
+
+/// Enables or disables the local protocol gateway and reconciles the listener.
+///
+/// # Arguments
+///
+/// * `enabled` - Whether the global protocol gateway switch is on.
+///
+/// # Errors
+///
+/// Returns `Err` if the setting cannot be persisted or the listener cannot be reconciled.
+#[tauri::command]
+pub async fn set_gateway_enabled(enabled: bool) -> Result<Value, String> {
+    let status = crate::core::protocol_proxy::set_gateway_enabled(enabled).await?;
+    serde_json::to_value(status).map_err(|e| e.to_string())
+}
+
+/// Helper to open a file or directory with the system default application.
+fn open_system_path(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new("cmd.exe");
+        cmd.args(["/c", "start", "", &path.to_string_lossy()]);
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        cmd.spawn().map_err(|e| format!("Failed to open path: {e}"))?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("Failed to open path: {e}"))?;
+        Ok(())
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("Failed to open path: {e}"))?;
+        Ok(())
+    }
+}
+
+/// Helper to reveal a file or directory in the system file manager.
+fn reveal_system_path(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new("explorer.exe");
+        if path.is_file() {
+            cmd.arg(format!("/select,{}", path.to_string_lossy()));
+        } else {
+            cmd.arg(path);
+        }
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        cmd.spawn().map_err(|e| format!("Failed to reveal path in explorer: {e}"))?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("open");
+        if path.is_file() {
+            cmd.arg("-R").arg(path);
+        } else {
+            cmd.arg(path);
+        }
+        cmd.spawn().map_err(|e| format!("Failed to reveal path in finder: {e}"))?;
+        Ok(())
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        let target_dir = if path.is_file() {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+        std::process::Command::new("xdg-open")
+            .arg(target_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to reveal directory in file manager: {e}"))?;
+        Ok(())
+    }
+}
+
+/// Returns the absolute path to a provider's model catalog or the root model-catalogs directory.
+#[tauri::command]
+pub async fn get_model_catalog_path(provider_id: Option<String>) -> Result<String, String> {
+    let dir = crate::core::provider::model_catalogs_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Some(pid) = provider_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let file_path = crate::core::provider::provider_host_catalog_path(pid);
+        Ok(file_path.to_string_lossy().to_string())
+    } else {
+        Ok(dir.to_string_lossy().to_string())
+    }
+}
+
+/// Opens the provider's model catalog file or the root model-catalogs directory with default application.
+#[tauri::command]
+pub async fn open_model_catalog(provider_id: Option<String>) -> Result<(), String> {
+    let dir = crate::core::provider::model_catalogs_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Some(pid) = provider_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let file_path = crate::core::provider::provider_host_catalog_path(pid);
+        if file_path.is_file() {
+            open_system_path(&file_path)
+        } else {
+            open_system_path(&dir)
+        }
+    } else {
+        open_system_path(&dir)
+    }
+}
+
+/// Reveals the provider's model catalog file or the root model-catalogs directory in the system file manager.
+#[tauri::command]
+pub async fn show_model_catalog_in_folder(provider_id: Option<String>) -> Result<(), String> {
+    let dir = crate::core::provider::model_catalogs_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Some(pid) = provider_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let file_path = crate::core::provider::provider_host_catalog_path(pid);
+        if file_path.is_file() {
+            reveal_system_path(&file_path)
+        } else {
+            reveal_system_path(&dir)
+        }
+    } else {
+        reveal_system_path(&dir)
+    }
 }

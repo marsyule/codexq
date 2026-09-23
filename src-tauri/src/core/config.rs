@@ -51,6 +51,10 @@ fn default_zero_f64() -> f64 {
     0.0
 }
 
+fn default_proxy_port() -> u16 {
+    super::protocol_proxy::DEFAULT_PROXY_PORT
+}
+
 /// Account-level auto-rollover configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountRolloverConfig {
@@ -69,6 +73,24 @@ impl Default for AccountRolloverConfig {
     }
 }
 
+/// Local protocol gateway preferences.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_proxy_port")]
+    pub port: u16,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            port: default_proxy_port(),
+        }
+    }
+}
+
 /// Root structure of `config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -80,6 +102,8 @@ pub struct AppConfig {
     pub auto_refresh: AutoRefreshConfig,
     #[serde(default)]
     pub trigger: TriggerConfig,
+    #[serde(default)]
+    pub proxy: ProxyConfig,
 }
 
 impl Default for AppConfig {
@@ -89,6 +113,7 @@ impl Default for AppConfig {
             general: GeneralConfig::default(),
             auto_refresh: AutoRefreshConfig::default(),
             trigger: TriggerConfig::default(),
+            proxy: ProxyConfig::default(),
         }
     }
 }
@@ -182,7 +207,18 @@ pub fn load_config() -> AppConfig {
         Ok(content) => match serde_json::from_str::<AppConfig>(&content) {
             Ok(cfg) => cfg,
             Err(err) => {
-                log::warn!("Failed to parse config.json, using defaults: {err}");
+                // Quarantine the broken file before any default can be persisted: the
+                // config is documented as hand-editable, so a typo must never turn into
+                // a silent wipe of every setting on the next `set_setting` call.
+                log::warn!("Failed to parse config.json ({err}); quarantining the broken file and using defaults");
+                let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                let quarantine = codexq_home().join(format!("config.json.bad-{stamp}"));
+                if let Err(rename_err) = fs::rename(&path, &quarantine) {
+                    log::warn!(
+                        "Could not quarantine broken config.json as {}: {rename_err}",
+                        quarantine.display()
+                    );
+                }
                 AppConfig::default()
             }
         },
@@ -280,6 +316,11 @@ pub fn get_all_settings() -> HashMap<String, String> {
         "auto_refresh.notify_on_update".to_string(),
         if cfg.auto_refresh.notify_on_update { "true" } else { "false" }.to_string(),
     );
+    map.insert(
+        "proxy.enabled".to_string(),
+        if cfg.proxy.enabled { "true" } else { "false" }.to_string(),
+    );
+    map.insert("proxy.port".to_string(), cfg.proxy.port.to_string());
 
     map
 }
@@ -334,6 +375,16 @@ pub fn set_setting(key: &str, value: &str) -> Result<(), String> {
         }
         "auto_refresh.notify_on_update" => {
             cfg.auto_refresh.notify_on_update = val_trimmed.eq_ignore_ascii_case("true");
+        }
+        "proxy.enabled" => {
+            cfg.proxy.enabled = val_trimmed.eq_ignore_ascii_case("true");
+        }
+        "proxy.port" => {
+            if let Ok(port) = val_trimmed.parse::<u16>() {
+                if port > 0 {
+                    cfg.proxy.port = port;
+                }
+            }
         }
         _ => {
             log::warn!("Unrecognized config setting key: {key}");

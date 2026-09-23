@@ -1,12 +1,15 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import type { AccountData, ActiveRuntimeMode } from '../types';
+import { invoke } from '@tauri-apps/api/core';
+import type { AccountData, ActiveRuntimeMode, ProviderData } from '../types';
+import { getModelReasoningLevels, hasMaxReasoning } from '../types';
 import { getQuotaStatus, getStatusColors, formatRelativeTime } from '../utils';
-import { Edit3, History, Zap, AlertCircle, RotateCcw, Layers } from 'lucide-react';
+import { Edit3, History, Zap, AlertCircle, RotateCcw, Layers, FileCode } from 'lucide-react';
 
 interface ActiveHeroCardProps {
   account?: AccountData | null;
   activeMode?: ActiveRuntimeMode | null;
+  providers?: ProviderData[];
   onEditAlias?: (acc: AccountData) => void;
   onViewHistory?: (acc: AccountData) => void;
   onSwitchToOfficial?: () => void;
@@ -15,6 +18,7 @@ interface ActiveHeroCardProps {
 export const ActiveHeroCard: React.FC<ActiveHeroCardProps> = ({
   account,
   activeMode,
+  providers,
   onEditAlias,
   onViewHistory,
   onSwitchToOfficial,
@@ -23,6 +27,10 @@ export const ActiveHeroCard: React.FC<ActiveHeroCardProps> = ({
 
   // If in Third-Party Provider Mode
   if (activeMode && activeMode.mode === 'provider') {
+    const currentProv = providers?.find((p) => p.id === activeMode.provider_id);
+    const levels = currentProv ? getModelReasoningLevels(currentProv, activeMode.active_model) : [];
+    const hasMax = hasMaxReasoning(levels);
+
     return (
       <div className="relative overflow-hidden rounded-xl border border-blue-200/90 bg-white p-3.5 shadow-xs transition-all hover:shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -38,7 +46,7 @@ export const ActiveHeroCard: React.FC<ActiveHeroCardProps> = ({
               </span>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-sm font-bold tracking-tight text-slate-900 truncate">
                 {activeMode.name}
               </span>
@@ -46,6 +54,24 @@ export const ActiveHeroCard: React.FC<ActiveHeroCardProps> = ({
                 <Layers className="w-3 h-3 text-blue-600" />
                 {activeMode.active_model}
               </span>
+              {hasMax && (
+                <span
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-mono font-semibold bg-amber-50 border border-amber-200 text-amber-700 shadow-2xs"
+                  title={t('providers.maxReasoningActiveBadge', '⚡ Max 推理就绪')}
+                >
+                  <span>⚡</span>
+                  <span>Max</span>
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => invoke('open_model_catalog', { providerId: activeMode.provider_id })}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono text-slate-500 hover:text-blue-600 bg-slate-50 hover:bg-slate-100 border border-slate-200 transition-colors cursor-pointer"
+                title={t('providers.openCatalogFile', '打开模型配置 (JSON)')}
+              >
+                <FileCode className="w-3 h-3 text-slate-400" />
+                <span>{t('providers.openCatalogFile', '配置')}</span>
+              </button>
             </div>
 
             {activeMode.base_url && (

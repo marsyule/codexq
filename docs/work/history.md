@@ -222,3 +222,63 @@
 - **验证**：
   - Python 单元测试 40/40 通过（原 39 + 新增 1）；
   - 隔离断言：真实 `~/.codex/model-catalogs`（3 个文件）与 `~/.codexq` 未被测试写入。
+
+---
+
+## 17. 恢复 Provider 模型目录加载
+
+- **背景**：用户反馈 Codex Desktop 的自定义模型下拉项再次消失。检查发现 CodexQ 仍生成 `codexq-<provider>.json`，但 provider 切换逻辑无条件删除 `model_catalog_json`，因此目录从未被 Codex 加载。
+- **误判纠正**：OpenAI Docs 当前配置参考将 `model_catalog_json` 定义为用户级模型目录路径；Codex CLI 0.149.1 在使用绝对路径时可正常加载。此前“该键非法”的判断来自对相对路径失败的误读。
+- **决策**：桌面端 provider 激活/编辑时写入目录绝对路径；切回官方时只删除 CodexQ 管理的 `codexq-*` 或 provider 沙箱路径，保留用户目录。Python 端冻结，不纳入此项提交。
+- **验证**：Rust 单元测试、`cargo check` 通过；Codex CLI 0.149.1 的隔离命令验证可读取目录路径。
+
+---
+
+## 18. 模型推理强度档位（Reasoning Effort）配置与快速模型目录导航
+
+- **背景**：部分高阶推理模型（如 MiMo 等）支持更深层次的推理档位（最高可达 `max`），而此前模型目录生成器仅硬编码固定的 `[low, medium, high, xhigh]`，未向用户显现与提供扩展能力。同时用户需要直观打开与查阅 `model-catalogs.json` 目录和配置文件。
+- **决策**：
+  1. **渐进式档位扩展**：默认提供 `low`、`medium`、`high` 作为标准基线，支持按强度顺序一键快捷添加 `+ xhigh`、`+ ⚡ max`、`+ none` 或输入任意自定义档位；
+  2. **双层模型粒度**：支持服务商默认档位与单模型覆盖（如特定大模型独占 `max`）；
+  3. **模型目录导航**：新增 `open_model_catalog` 与 `show_model_catalog_in_folder` 跨平台打开命令；在顶栏、卡片操作栏与模态框高级设置中分别提供直观入口；
+  4. **桌面 Schema 幂等迁移**：Rust 侧新增字段并在旧库上平滑补列；Python 端冻结，不纳入此项提交。
+- **验证**：
+  - Rust 单元测试 17/17 通过；
+  - Python 冻结端未作为该能力的发布范围；
+  - 前端 `pnpm run build` 打包构建通过。
+
+
+## 19. 本地协议网关交互总开关与按需生命周期
+
+- **背景**：任务 29 将协议粒度下沉到模型后，协议选择器仍出现在高级设置中，语义容易与「是否需要本地网关」混淆；且全 Responses 服务商也会因旧全局 proxy 设置启动本地监听。
+- **决策**：
+  1. 新增 `providers.gateway_enabled` 作为服务商模型的「本地协议网关」总开关；开启时每条模型可选择 `responses` / `chat`，关闭时保存流程强制 `wire_api = responses` 并清空 `model_wire_apis`。
+  2. 旧库通过幂等 `ALTER TABLE` 补列，并按旧协议配置一次性推导总开关。
+  3. 网关生命周期按需收敛：启动、切换与编辑当前服务商时只在活跃服务商存在任一 Chat 模型时启动，否则停止；开启总开关但全 Responses 仍保持直连。
+  4. `config.toml` 继续恒定写入 `wire_api = "responses"`，不向上游或 Codex 配置泄漏 Chat 协议。
+- **验证**：
+  - Rust 单元测试 69/69，包含新增 `master_switch_off_forces_direct_everywhere` 与 `enabled_but_all_responses_provider_stays_direct`；集成测试 1/1；
+  - `cargo check` 与前端 `pnpm run build` 通过。
+- **尚未闭环**：重启桌面端后真机确认全 Responses 服务商不占用 17871，切回官方时监听停止。
+
+## 20. 切回官方后保留旧桌面会话的 provider 解析能力
+
+- **背景**：从第三方 provider 切回官方账号后，Codex Desktop 打开该 provider 的旧会话会提示 `Model provider '<id>' not found`；新建官方会话不受影响。
+- **根因**：`switch_account` 为清除 `config.toml` 中的明文 bearer token，直接删除了当前 provider 表；旧会话仍按其已保存的 provider id 查找配置。
+- **决策**：切回官方时仍清除活动 `model` / `model_provider` 与 catalog，并停止网关；若该 provider 由 CodexQ 管理，则将其表替换为无密钥、无自定义字段的最小占位项，使用不可连接的本机地址，保留会话所需的 provider id。未知 provider 仍按既有行为删除。桌面端启动时还会从 SQLite 补回旧版本已删掉的非活动 provider 占位表，因此现有用户重启 CodexQ 后即可恢复旧会话解析。
+- **维护范围**：只改桌面 Rust core；Python CLI 处于冻结维护且不具备 Codex Desktop 会话流程，不做 parity 扩展。
+- **验证**：隔离用户目录后 Rust 单元测试 75/75 与集成测试 1/1 通过；cargo check 通过。
+
+## 21. 保留 Chat Completions reasoning_content 往返
+
+- **背景**：OpenCode Go 的 DeepSeek thinking 模式间歇返回 `The reasoning_content in the thinking mode must be passed back to the API.`；失败没有固定运行时长，常出现在 assistant 可见文本后接工具调用的轮次。
+- **根因**：网关忽略 Chat Completions 响应中的 `message.reasoning_content` / 流式 `delta.reasoning_content`，导致 Codex 收到的 Responses 历史缺少 reasoning item；下一请求回放该 assistant 工具调用时，上游要求的推理文本无法带回。另一个结构问题是 Responses 将一轮 assistant 的文本与工具调用分成两个 item，而请求适配器将它们拆成两条 Chat assistant 消息。
+- **修复**：非流式与流式转换均保留 reasoning item；请求转换读取 reasoning item 的 `content[].reasoning_text`（缺失时读取 `summary[].summary_text`），并把它附到 assistant 消息的 `reasoning_content`；相邻 assistant 文本与工具调用合并，工具结果继续紧随调用。
+- **为何间歇触发**：只有模型实际产生非空推理内容、并在后续请求中重放该轮历史时才触发上游校验；纯文本轮次或尚未回放该历史的请求不触发，所以任务已经运行十几分钟也可能随后报错。
+- **测试**：新增非流式映射、流式 reasoning item 生命周期及完整 reasoning → assistant 文本 → function call → tool output 往返测试；定向 `translate` 16/16、`stream` 12/12 通过。全量验证结果由 `docs/work/current.md` 任务 33 记录。
+
+## 22. 网关流式错误与旧会话误路由修复
+
+- **根因**：原生 Responses 的 SSE 错误被流式分支固定写成 HTTP 200；Chat SSE 字节块逐块解码会破坏跨块 UTF-8 字符；切换 provider 后旧会话的网关请求会按新活动 provider 路由。
+- **修复**：仅成功状态进入 SSE 透传；先按字节拼齐 SSE 行再解码；请求凭据必须与活动 provider 的沙箱密钥匹配，不匹配时返回明确的网关错误。
+- **验证**：新增三项定向回归测试，Rust 全量测试与 `cargo check` 通过。

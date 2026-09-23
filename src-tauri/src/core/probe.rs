@@ -516,10 +516,17 @@ pub async fn refresh_one(identity_key: &str, timeout_secs: u64) -> Result<bool, 
 
             let clean_msg = if is_auth_error {
                 "Authentication token expired (401 Unauthorized). Automatic renewal failed; please switch to this account and sign in again.".to_string()
-            } else if err.len() > 180 {
-                format!("{}...", &err[..180])
             } else {
-                err.clone()
+                // Char-boundary-safe truncation: app-server error messages can contain
+                // multi-byte UTF-8, and a byte-range slice would panic here — on the
+                // auto-refresh failure path, no less.
+                let chars: Vec<char> = err.chars().collect();
+                if chars.len() > 180 {
+                    let clipped: String = chars[..180].iter().collect();
+                    format!("{clipped}...")
+                } else {
+                    err.clone()
+                }
             };
 
             let _ = conn.execute(

@@ -192,6 +192,10 @@ pub fn get_connection() -> Result<Connection, String> {
               models_json TEXT NOT NULL DEFAULT '[]',
               context_window INTEGER DEFAULT 256000,
               model_context_windows TEXT DEFAULT '{}',
+              reasoning_levels TEXT,
+              model_reasoning_levels TEXT,
+              model_wire_apis TEXT,
+              gateway_enabled INTEGER NOT NULL DEFAULT 0,
               notes TEXT,
               custom_config_toml TEXT,
               custom_auth_json TEXT,
@@ -211,8 +215,41 @@ pub fn get_connection() -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE providers ADD COLUMN model_context_windows TEXT DEFAULT '{}'", []);
     let _ = conn.execute("ALTER TABLE providers ADD COLUMN key_masked TEXT NOT NULL DEFAULT ''", []);
     let _ = conn.execute("ALTER TABLE providers ADD COLUMN key_sha256 TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN reasoning_levels TEXT", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN model_reasoning_levels TEXT", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN model_wire_apis TEXT", []);
+    let _ = conn.execute("ALTER TABLE providers ADD COLUMN gateway_enabled INTEGER NOT NULL DEFAULT 0", []);
 
+    // The `gateway_enabled` derivation from legacy `wire_api` values is applied once per
+    // app launch by `migrate_gateway_enabled_derivation()` (called from `lib.rs` setup),
+    // NOT here: running it on every connection would silently re-enable the switch after
+    // the user turned it off while a legacy `wire_api` value was still on record.
     Ok(conn)
+}
+
+/// Derives the per-provider `gateway_enabled` switch from legacy protocol fields.
+///
+/// Runs once per app launch (from `lib.rs` setup, after schema migration). A provider
+/// whose `wire_api` is a legacy Chat value — or whose `model_wire_apis` map contains a
+/// Chat entry — gets the switch turned on; everything else keeps its stored value.
+/// Re-running this on every DB connection would resurrect a switch the user turned off
+/// in the UI whenever Python (frozen, unaware of the column) or hand-edited SQL had
+/// written a legacy `wire_api` value.
+pub fn migrate_gateway_enabled_derivation() -> Result<(), String> {
+    let conn = get_connection()?;
+    conn.execute(
+        concat!(
+            "UPDATE providers SET gateway_enabled = 1 ",
+            "WHERE lower(trim(wire_api)) IN ('chat', 'chat_completions', 'chat-completions', 'completions', 'completion') ",
+            // Match any JSON-string value equal to `chat` inside the serialized map
+            // (`"chat"` with both quotes); the previous prefix pattern could never
+            // match a JSON object, which always starts with `{`.
+            r#"OR model_wire_apis LIKE '%"chat"%'"#
+        ),
+        [],
+    )
+    .map_err(|e| format!("Failed to derive gateway_enabled from legacy wire_api: {e}"))?;
+    Ok(())
 }
 
 /// Ingests an `auth.json` file into SQLite and the profile sandbox.
@@ -644,8 +681,13 @@ pub fn list_accounts_with_quota() -> Result<Vec<AccountData>, String> {
                 .clone()
                 .or_else(|| email.clone())
                 .unwrap_or_else(|| {
-                    if user_id.len() > 18 {
-                        format!("{}...{}", &user_id[..8], &user_id[user_id.len() - 6..])
+                    // Slice by chars: a byte-range slice would panic on a multi-byte
+                    // `user_id` (not expected from OpenAI, but not worth crashing over).
+                    let chars: Vec<char> = user_id.chars().collect();
+                    if chars.len() > 18 {
+                        let head: String = chars[..8].iter().collect();
+                        let tail: String = chars[chars.len() - 6..].iter().collect();
+                        format!("{head}...{tail}")
                     } else {
                         user_id.clone()
                     }
@@ -958,7 +1000,8 @@ pub fn list_providers() -> Result<Vec<super::provider::Provider>, String> {
         .prepare(
             "SELECT id, name, base_url, wire_api, active_model, models_json,
                     notes, custom_config_toml, custom_auth_json, key_masked, created_at, updated_at,
-                    context_window, model_context_windows
+                    context_window, model_context_windows, reasoning_levels, model_reasoning_levels,
+                    model_wire_apis, gateway_enabled
              FROM providers
              ORDER BY updated_at DESC",
         )
@@ -973,6 +1016,19 @@ pub fn list_providers() -> Result<Vec<super::provider::Provider>, String> {
             let model_context_windows = model_contexts_raw
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok());
+            let reasoning_levels_raw: Option<String> = row.get(14).unwrap_or(None);
+            let reasoning_levels = reasoning_levels_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let model_reasoning_raw: Option<String> = row.get(15).unwrap_or(None);
+            let model_reasoning_levels = model_reasoning_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let model_wire_raw: Option<String> = row.get(16).unwrap_or(None);
+            let model_wire_apis = model_wire_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let gateway_enabled: bool = row.get::<_, Option<bool>>(17)?.unwrap_or(false);
             Ok(super::provider::Provider {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -982,6 +1038,10 @@ pub fn list_providers() -> Result<Vec<super::provider::Provider>, String> {
                 models,
                 context_window,
                 model_context_windows,
+                reasoning_levels,
+                model_reasoning_levels,
+                model_wire_apis,
+                gateway_enabled,
                 notes: row.get(6)?,
                 custom_config_toml: row.get(7)?,
                 custom_auth_json: row.get(8)?,
@@ -1006,7 +1066,8 @@ pub fn get_provider(id: &str) -> Result<Option<super::provider::Provider>, Strin
         .prepare(
             "SELECT id, name, base_url, wire_api, active_model, models_json,
                     notes, custom_config_toml, custom_auth_json, key_masked, created_at, updated_at,
-                    context_window, model_context_windows
+                    context_window, model_context_windows, reasoning_levels, model_reasoning_levels,
+                    model_wire_apis, gateway_enabled
              FROM providers
              WHERE id = ?1",
         )
@@ -1021,6 +1082,19 @@ pub fn get_provider(id: &str) -> Result<Option<super::provider::Provider>, Strin
             let model_context_windows = model_contexts_raw
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok());
+            let reasoning_levels_raw: Option<String> = row.get(14).unwrap_or(None);
+            let reasoning_levels = reasoning_levels_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let model_reasoning_raw: Option<String> = row.get(15).unwrap_or(None);
+            let model_reasoning_levels = model_reasoning_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let model_wire_raw: Option<String> = row.get(16).unwrap_or(None);
+            let model_wire_apis = model_wire_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let gateway_enabled: bool = row.get::<_, Option<bool>>(17)?.unwrap_or(false);
             Ok(super::provider::Provider {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -1030,6 +1104,10 @@ pub fn get_provider(id: &str) -> Result<Option<super::provider::Provider>, Strin
                 models,
                 context_window,
                 model_context_windows,
+                reasoning_levels,
+                model_reasoning_levels,
+                model_wire_apis,
+                gateway_enabled,
                 notes: row.get(6)?,
                 custom_config_toml: row.get(7)?,
                 custom_auth_json: row.get(8)?,
@@ -1058,14 +1136,53 @@ pub fn upsert_provider(
         &provider.model_context_windows.clone().unwrap_or_default(),
     )
     .unwrap_or_else(|_| "{}".to_string());
+    let sorted_reasoning_levels = provider.reasoning_levels.as_ref().map(|v| {
+        let mut cloned = v.clone();
+        super::provider::sort_reasoning_levels(&mut cloned);
+        cloned
+    });
+    let reasoning_levels_json = sorted_reasoning_levels
+        .as_ref()
+        .and_then(|v| serde_json::to_string(v).ok());
+
+    let sorted_model_reasoning = provider.model_reasoning_levels.as_ref().map(|m| {
+        let mut map = std::collections::HashMap::new();
+        for (k, v) in m {
+            let mut cloned = v.clone();
+            super::provider::sort_reasoning_levels(&mut cloned);
+            map.insert(k.clone(), cloned);
+        }
+        map
+    });
+    let model_reasoning_json = sorted_model_reasoning
+        .as_ref()
+        .and_then(|m| serde_json::to_string(m).ok());
+    // Normalize every override so a legacy `chat_completions` value can never be stored
+    // and later mistaken for a third protocol.
+    let normalized_model_wire = provider.model_wire_apis.as_ref().map(|m| {
+        let mut map = std::collections::HashMap::new();
+        for (k, v) in m {
+            let slug = k.trim();
+            if slug.is_empty() {
+                continue;
+            }
+            map.insert(slug.to_string(), super::protocol_proxy::normalize_wire_api(v));
+        }
+        map
+    });
+    let model_wire_apis_json = normalized_model_wire
+        .as_ref()
+        .filter(|m| !m.is_empty())
+        .and_then(|m| serde_json::to_string(m).ok());
     let context_window_val = provider.context_window.unwrap_or(super::provider::DEFAULT_MIN_CONTEXT_WINDOW);
 
     conn.execute(
         "INSERT INTO providers (
             id, name, base_url, wire_api, active_model, models_json,
-            context_window, model_context_windows,
+            context_window, model_context_windows, reasoning_levels, model_reasoning_levels,
+            model_wire_apis, gateway_enabled,
             notes, custom_config_toml, custom_auth_json, key_masked, key_sha256, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             base_url = excluded.base_url,
@@ -1074,6 +1191,10 @@ pub fn upsert_provider(
             models_json = excluded.models_json,
             context_window = excluded.context_window,
             model_context_windows = excluded.model_context_windows,
+            reasoning_levels = excluded.reasoning_levels,
+            model_reasoning_levels = excluded.model_reasoning_levels,
+            model_wire_apis = excluded.model_wire_apis,
+            gateway_enabled = excluded.gateway_enabled,
             notes = excluded.notes,
             custom_config_toml = excluded.custom_config_toml,
             custom_auth_json = excluded.custom_auth_json,
@@ -1089,6 +1210,10 @@ pub fn upsert_provider(
             models_json,
             context_window_val,
             model_contexts_json,
+            reasoning_levels_json,
+            model_reasoning_json,
+            model_wire_apis_json,
+            provider.gateway_enabled,
             provider.notes,
             provider.custom_config_toml,
             provider.custom_auth_json,

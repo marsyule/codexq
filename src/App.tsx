@@ -17,6 +17,7 @@ import { TriggerSettingsCard } from './components/TriggerSettingsCard';
 import { AddAccountModal } from './components/AddAccountModal';
 import { DoctorCard } from './components/DoctorCard';
 import { ProvidersView } from './components/ProvidersView';
+import { GatewaySettingsCard } from './components/GatewaySettingsCard';
 import {
   RefreshCw,
   RotateCcw,
@@ -915,6 +916,7 @@ export function App() {
                 <ActiveHeroCard
                   account={activeAccount}
                   activeMode={activeMode}
+                  providers={providers}
                   onEditAlias={(acc) => setAliasAccount(acc)}
                   onViewHistory={(acc) => setHistoryAccount(acc)}
                   onSwitchToOfficial={handleSwitchToOfficial}
@@ -1067,6 +1069,8 @@ export function App() {
                 </div>
               </div>
 
+              {/* Local Protocol Gateway Card */}
+              <GatewaySettingsCard showToast={showToast} activeMode={activeMode} />
               {/* Auto-Refresh Settings Card */}
               <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs space-y-4">
                 <div className="flex items-center justify-between pb-2 border-b border-slate-100">

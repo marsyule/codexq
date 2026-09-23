@@ -399,6 +399,8 @@ mod tests {
             &["step-5-preview".to_string(), "deepseek-v4-flash".to_string()],
             Some(512_000),
             Some(&model_contexts),
+            None,
+            None,
         );
         assert_eq!(cat_content.models.len(), 2);
         assert_eq!(cat_content.models[0].slug, "deepseek-v4-flash");
@@ -477,22 +479,275 @@ feature_flag = true
     }
 
     #[test]
+    fn test_apply_provider_routing_rewrites_only_the_target_table() {
+        use crate::core::switch::apply_provider_routing;
+        use toml_edit::DocumentMut;
+
+        // A config where one provider was previously left on a Chat Completions address,
+        // as written by a pre-gateway CodexQ version.
+        let mut doc: DocumentMut = r#"# keep this comment
+model = "deepseek-v4.1-flash"
+model_provider = "opencode-go"
+
+[model_providers.opencode-go]
+name = "opencode-go"
+base_url = "https://opencode.ai/zen/go/v1"
+wire_api = "chat"
+
+[model_providers.untouched]
+name = "Untouched"
+base_url = "https://api.stepfun.com/step_plan/v1"
+wire_api = "responses"
+"#
+        .parse()
+        .expect("parse config");
+
+        apply_provider_routing(&mut doc, "opencode-go", "http://127.0.0.1:17871/v1");
+        let rendered = doc.to_string();
+
+        assert!(rendered.contains(r#"base_url = "http://127.0.0.1:17871/v1""#));
+        // The provider was re-pointed, so its `wire_api` must become Codex-legal.
+        assert!(!rendered.contains(r#"wire_api = "chat""#));
+        // Only the target table may change; a sibling provider keeps its direct address.
+        assert!(rendered.contains(r#"base_url = "https://api.stepfun.com/step_plan/v1""#));
+        assert!(rendered.contains("# keep this comment"));
+        assert!(rendered.contains("[model_providers.untouched]"));
+
+        // An unknown provider id must be a no-op rather than adding a phantom table.
+        apply_provider_routing(&mut doc, "does-not-exist", "http://127.0.0.1:9999/v1");
+        let after_missing = doc.to_string();
+        assert!(!after_missing.contains("does-not-exist"));
+        assert!(!after_missing.contains("127.0.0.1:9999"));
+
+        // The inline-table form Codex also accepts must be handled.
+        let mut inline: DocumentMut = r#"
+[model_providers]
+opencode-go = { name = "opencode-go", base_url = "https://opencode.ai/zen/go/v1", wire_api = "chat" }
+"#
+        .parse()
+        .expect("parse inline config");
+        apply_provider_routing(&mut inline, "opencode-go", "http://127.0.0.1:17871/v1");
+        let inline_rendered = inline.to_string();
+        assert!(inline_rendered.contains("http://127.0.0.1:17871/v1"));
+        assert!(!inline_rendered.contains(r#"wire_api = "chat""#));
+    }
+
+    #[test]
+    fn test_inactive_provider_keeps_session_id_without_credentials() {
+        use crate::core::switch::deactivate_provider_entry;
+        use toml_edit::DocumentMut;
+
+        let mut doc: DocumentMut = r#"
+model_provider = "opencode-go"
+model = "grok-4.1"
+
+[model_providers.opencode-go]
+name = "OpenCode Go"
+base_url = "https://opencode.ai/zen/go/v1"
+wire_api = "responses"
+experimental_bearer_token = "secret-key"
+custom_secret = "also-secret"
+
+[model_providers.untouched]
+name = "Untouched"
+base_url = "https://example.com/v1"
+wire_api = "responses"
+"#
+        .parse()
+        .expect("parse config");
+
+        assert!(deactivate_provider_entry(
+            &mut doc,
+            "opencode-go",
+            Some("OpenCode Go"),
+        ));
+
+        let provider = &doc["model_providers"]["opencode-go"];
+        assert_eq!(provider["name"].as_str(), Some("OpenCode Go"));
+        assert_eq!(provider["base_url"].as_str(), Some("http://127.0.0.1:1/v1"));
+        assert_eq!(provider["wire_api"].as_str(), Some("responses"));
+        assert!(provider.get("experimental_bearer_token").is_none());
+        assert!(provider.get("custom_secret").is_none());
+        assert_eq!(
+            doc["model_providers"]["untouched"]["base_url"].as_str(),
+            Some("https://example.com/v1")
+        );
+        assert!(doc["model_providers"].get("missing").is_none());
+        assert!(deactivate_provider_entry(&mut doc, "stepfun", Some("StepFun")));
+        assert_eq!(
+            doc["model_providers"]["stepfun"]["base_url"].as_str(),
+            Some("http://127.0.0.1:1/v1")
+        );
+
+        assert!(deactivate_provider_entry(&mut doc, "opencode-go", None));
+        assert!(doc["model_providers"].get("opencode-go").is_none());
+    }
+
+    #[test]
     fn test_model_catalog_default_and_minimum_clamp() {
         use crate::core::provider::*;
 
         // 1. Without context window provided, default to 256k minimum (256,000 tokens)
         let cat_content =
-            build_model_catalog("default-model", &["default-model".to_string()], None, None);
+            build_model_catalog("default-model", &["default-model".to_string()], None, None, None, None);
         assert_eq!(cat_content.models[0].context_window, 256_000);
         assert_eq!(cat_content.models[0].effective_context_window_percent, 95);
         assert_eq!(cat_content.models[0].auto_compact_token_limit, Some(217_600));
 
         // 2. If configured below 256k (e.g. 128k), clamp to 256k minimum
         let cat_content2 =
-            build_model_catalog("small-model", &["small-model".to_string()], Some(128_000), None);
+            build_model_catalog("small-model", &["small-model".to_string()], Some(128_000), None, None, None);
         assert_eq!(cat_content2.models[0].context_window, 256_000);
         assert_eq!(cat_content2.models[0].effective_context_window_percent, 95);
         assert_eq!(cat_content2.models[0].auto_compact_token_limit, Some(217_600));
+    }
+
+    #[test]
+    fn test_model_catalog_reasoning_levels() {
+        use crate::core::provider::*;
+        use std::collections::HashMap;
+
+        // Case 1: Default baseline reasoning levels: low, medium, high
+        let cat_default = build_model_catalog(
+            "model-std",
+            &["model-std".to_string()],
+            None,
+            None,
+            None,
+            None,
+        );
+        let std_efforts: Vec<String> = cat_default.models[0]
+            .supported_reasoning_levels
+            .iter()
+            .map(|l| l.effort.clone())
+            .collect();
+        assert_eq!(std_efforts, vec!["low", "medium", "high"]);
+        assert_eq!(cat_default.models[0].default_reasoning_level, "medium");
+
+        // Case 2: Provider-level extended with max and xhigh (intentionally out-of-order input)
+        let provider_levels = vec!["max".to_string(), "low".to_string(), "xhigh".to_string(), "medium".to_string(), "high".to_string()];
+        let cat_ext = build_model_catalog(
+            "model-ext",
+            &["model-ext".to_string()],
+            None,
+            None,
+            Some(&provider_levels),
+            None,
+        );
+        let ext_efforts: Vec<String> = cat_ext.models[0]
+            .supported_reasoning_levels
+            .iter()
+            .map(|l| l.effort.clone())
+            .collect();
+        // Must be sorted in canonical effort progression: low < medium < high < xhigh < max
+        assert_eq!(ext_efforts, vec!["low", "medium", "high", "xhigh", "max"]);
+        let max_tier = cat_ext.models[0]
+            .supported_reasoning_levels
+            .iter()
+            .find(|l| l.effort == "max")
+            .unwrap();
+        assert_eq!(max_tier.description, "Maximum reasoning depth for the hardest problems");
+
+        // Case 3: Per-model override with max (e.g. mimo-v2.6-pro has max, others have baseline)
+        let mut model_reasoning = HashMap::new();
+        model_reasoning.insert(
+            "mimo-v2.6-pro".to_string(),
+            vec!["low".to_string(), "medium".to_string(), "high".to_string(), "max".to_string()],
+        );
+        let cat_override = build_model_catalog(
+            "mimo-v2.6-pro",
+            &["mimo-v2.6-pro".to_string(), "mimo-v2.6-flash".to_string()],
+            None,
+            None,
+            None,
+            Some(&model_reasoning),
+        );
+        let pro_efforts: Vec<String> = cat_override.models[0]
+            .supported_reasoning_levels
+            .iter()
+            .map(|l| l.effort.clone())
+            .collect();
+        assert_eq!(pro_efforts, vec!["low", "medium", "high", "max"]);
+
+        let flash_efforts: Vec<String> = cat_override.models[1]
+            .supported_reasoning_levels
+            .iter()
+            .map(|l| l.effort.clone())
+            .collect();
+        assert_eq!(flash_efforts, vec!["low", "medium", "high"]);
+    }
+
+    #[test]
+    fn test_gateway_port_resolution_precedence() {
+        use crate::core::config::AppConfig;
+        use crate::core::protocol_proxy::{resolve_port_with_source, PortSource, DEFAULT_PROXY_PORT};
+
+        let mut cfg = AppConfig::default();
+
+        // Stored 0 means "unset" and must fall back to the compiled-in default.
+        cfg.proxy.port = 0;
+        assert_eq!(
+            resolve_port_with_source(&cfg, None),
+            (DEFAULT_PROXY_PORT, PortSource::Default)
+        );
+
+        // An explicit config value beats the default...
+        cfg.proxy.port = 18888;
+        assert_eq!(
+            resolve_port_with_source(&cfg, None),
+            (18888, PortSource::Config)
+        );
+
+        // ...the environment override beats the config (trimmed)...
+        assert_eq!(
+            resolve_port_with_source(&cfg, Some(" 19999 ")),
+            (19999, PortSource::Env)
+        );
+
+        // ...and an unusable override falls through instead of pinning port 0.
+        assert_eq!(
+            resolve_port_with_source(&cfg, Some("0")),
+            (18888, PortSource::Config)
+        );
+        assert_eq!(
+            resolve_port_with_source(&cfg, Some("not-a-port")),
+            (18888, PortSource::Config)
+        );
+    }
+
+    #[test]
+    fn test_probe_port_reports_occupied_then_free() {
+        use crate::core::protocol_proxy::{probe_port, PortState};
+
+        // Hold an OS-assigned port so the probe has to report it as occupied. Binding must
+        // fail for a second bind on this platform, otherwise the gateway's own port conflict
+        // detection (and this probe) would be meaningless.
+        let holder = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("bind ephemeral port");
+        let held = holder.local_addr().expect("local addr").port();
+        assert_eq!(probe_port(held), PortState::Occupied);
+
+        // Released again: the probe reports the port as bindable.
+        drop(holder);
+        assert_eq!(probe_port(held), PortState::Free);
+
+        // Port 0 is never a real listening port.
+        assert_eq!(probe_port(0), PortState::Free);
+    }
+    #[test]
+    fn test_codexq_model_catalog_path_detection() {
+        assert!(crate::core::switch::is_codexq_model_catalog_path(
+            r"C:\Users\me\.codex\model-catalogs\codexq-stepfun.json"
+        ));
+        assert!(crate::core::switch::is_codexq_model_catalog_path(
+            "model-catalogs/codexq-newapi.json"
+        ));
+        assert!(crate::core::switch::is_codexq_model_catalog_path(
+            "/home/me/.codexq/providers/newapi/models.json"
+        ));
+        assert!(!crate::core::switch::is_codexq_model_catalog_path(
+            "/home/me/models/custom.json"
+        ));
     }
 }
 

@@ -10,8 +10,17 @@ import {
   Layers,
   ArrowRightLeft,
   Server,
+  FileCode,
 } from 'lucide-react';
-import { type ProviderData, type ConnectivityResult, type ToastPayload, formatContextWindow } from '../types';
+import {
+  type ProviderData,
+  type ConnectivityResult,
+  type ToastPayload,
+  formatContextWindow,
+  getModelReasoningLevels,
+  getModelWireApi,
+  hasMaxReasoning,
+} from '../types';
 
 interface ProviderCardProps {
   provider: ProviderData;
@@ -48,6 +57,31 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
     (provider.model_context_windows && provider.model_context_windows[selectedModel]) ||
     provider.context_window ||
     256_000;
+
+  const effectiveLevels = getModelReasoningLevels(provider, selectedModel);
+  const supportsMax = hasMaxReasoning(effectiveLevels);
+
+  // Protocol is resolved per model: a mixed-protocol provider serves some models natively
+  // and translates others from Chat Completions through the loopback gateway.
+  const selectedWireApi = getModelWireApi(provider, selectedModel);
+
+  const handleOpenCatalog = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await invoke('open_model_catalog', { providerId: provider.id });
+    } catch (err: any) {
+      showToast(String(err), 'error');
+    }
+  };
+
+  const handleShowCatalogInFolder = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await invoke('show_model_catalog_in_folder', { providerId: provider.id });
+    } catch (err: any) {
+      showToast(String(err), 'error');
+    }
+  };
 
   const initial = provider.name.trim().charAt(0).toUpperCase() || 'P';
 
@@ -156,6 +190,15 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
               {t('providers.targetModel', 'Target Model')}
             </span>
             <div className="flex items-center gap-1.5">
+              {supportsMax && (
+                <span
+                  className="inline-flex items-center gap-0.5 text-[10px] font-mono px-1.5 py-0.2 rounded border bg-amber-50 text-amber-700 border-amber-200/80 font-semibold"
+                  title={t('providers.maxReasoningBadge', '支持 Max')}
+                >
+                  <span>⚡</span>
+                  <span>Max</span>
+                </span>
+              )}
               <span
                 className="inline-flex items-center text-[10px] font-mono px-1.5 py-0.2 rounded border bg-blue-50/80 text-blue-700 border-blue-200/80 font-medium"
                 title={t('providers.contextWindowBadgeTitle', 'Context window: {{tokens}} tokens', {
@@ -163,6 +206,23 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
                 })}
               >
                 {formatContextWindow(effectiveCw)}
+              </span>
+              <span
+                className={`inline-flex items-center text-[10px] font-mono px-1.5 py-0.2 rounded border font-medium ${
+                  selectedWireApi === 'chat'
+                    ? 'bg-amber-50/80 text-amber-700 border-amber-200/80'
+                    : 'bg-emerald-50/80 text-emerald-700 border-emerald-200/80'
+                }`}
+                title={
+                  selectedWireApi === 'chat'
+                    ? t(
+                        'providers.wireApiChatBadgeTitle',
+                        '该模型仅支持 Chat Completions，请求经本地协议网关自动转换'
+                      )
+                    : t('providers.wireApiResponsesBadgeTitle', '该模型原生支持 Responses，直连上游')
+                }
+              >
+                {selectedWireApi === 'chat' ? '⇄ Chat' : 'Responses'}
               </span>
               <span className="text-[10px] text-slate-400 font-mono">
                 {provider.models.length} {t('providers.modelsAvailable', 'models')}
@@ -178,7 +238,7 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
             >
               {provider.models.length === 0 ? (
                 <option value={provider.active_model}>
-                  {provider.active_model} [{formatContextWindow(effectiveCw)}]
+                  {provider.active_model} [{formatContextWindow(effectiveCw)}{supportsMax ? ' · ⚡Max' : ''}]
                 </option>
               ) : (
                 provider.models.map((m) => {
@@ -186,9 +246,12 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
                     (provider.model_context_windows && provider.model_context_windows[m]) ||
                     provider.context_window ||
                     256_000;
+                  const mLevels = getModelReasoningLevels(provider, m);
+                  const mHasMax = hasMaxReasoning(mLevels);
+                  const mWireApi = getModelWireApi(provider, m);
                   return (
                     <option key={m} value={m}>
-                      {m} [{formatContextWindow(mCw)}] {m === provider.active_model ? `(${t('providers.defaultTag', 'Default')})` : ''}
+                      {m} [{formatContextWindow(mCw)}{mHasMax ? ' · ⚡Max' : ''}{mWireApi === 'chat' ? ' · ⇄Chat' : ''}] {m === provider.active_model ? `(${t('providers.defaultTag', 'Default')})` : ''}
                     </option>
                   );
                 })
@@ -239,16 +302,39 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
 
       {/* Card Footer: Actions */}
       <div className="mt-3 flex items-center justify-between border-t border-slate-100/90 pt-2.5">
-        <div className="flex items-center gap-1 text-[11px] font-mono text-slate-400">
-          <Server className="h-3 w-3 text-slate-400" />
+        <button
+          type="button"
+          onClick={handleOpenCatalog}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            handleShowCatalogInFolder(e);
+          }}
+          className="flex items-center gap-1 text-[11px] font-mono text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
+          title={`${t('providers.openCatalogFile', '打开模型配置 (JSON)')} (右键: ${t('providers.showCatalogInFolder', '在文件夹中定位')})`}
+        >
+          <Server className="h-3 w-3" />
           <span>{provider.id.slice(0, 12)}</span>
-        </div>
+        </button>
 
         <div className="flex items-center gap-1">
+          {/* Open Model Catalog File */}
+          <button
+            type="button"
+            onClick={handleOpenCatalog}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              handleShowCatalogInFolder(e);
+            }}
+            className="p-1 rounded-md text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors cursor-pointer"
+            title={`${t('providers.openCatalogFile', '打开模型配置 (JSON)')} (右键: ${t('providers.showCatalogInFolder', '在文件夹中定位')})`}
+          >
+            <FileCode className="w-3.5 h-3.5" />
+          </button>
+
           {/* Edit Button */}
           <button
             onClick={() => onEdit(provider)}
-            className="p-1 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+            className="p-1 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
             title={t('common.edit', 'Edit')}
           >
             <Edit3 className="w-3.5 h-3.5" />
@@ -257,7 +343,7 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
           {/* Delete Button */}
           <button
             onClick={() => onDelete(provider)}
-            className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+            className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
             title={t('common.delete', 'Delete')}
           >
             <Trash2 className="w-3.5 h-3.5" />

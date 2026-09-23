@@ -24,6 +24,20 @@ pub struct Provider {
     pub models: Vec<String>,
     pub context_window: Option<u64>,
     pub model_context_windows: Option<HashMap<String, u64>>,
+    pub reasoning_levels: Option<Vec<String>>,
+    pub model_reasoning_levels: Option<HashMap<String, Vec<String>>>,
+    /// Per-model upstream protocol overrides (`model slug -> "responses" | "chat"`).
+    ///
+    /// A single upstream can expose both protocols at once, so `wire_api` alone is not
+    /// expressive enough. Models absent from this map inherit the provider-level
+    /// `wire_api`. Values are normalized through
+    /// [`protocol_proxy::normalize_wire_api`](super::protocol_proxy::normalize_wire_api).
+    pub model_wire_apis: Option<HashMap<String, String>>,
+    /// Provider-level local protocol gateway switch.
+    ///
+    /// `false` forces every model to Responses and disables the gateway even if legacy
+    /// protocol fields still mention Chat. `true` enables per-model choices.
+    pub gateway_enabled: bool,
     pub notes: Option<String>,
     pub custom_config_toml: Option<String>,
     pub custom_auth_json: Option<String>,
@@ -31,6 +45,40 @@ pub struct Provider {
     pub created_at: String,
     pub updated_at: String,
 }
+
+impl Provider {
+    /// Resolves the upstream wire protocol for a specific model slug.
+    ///
+    /// # Arguments
+    ///
+    /// * `model` - Model slug from the incoming request; empty falls back to the default.
+    #[must_use]
+    pub fn wire_api_for_model(&self, model: &str) -> String {
+        if !self.gateway_enabled {
+            return super::protocol_proxy::CODEX_WIRE_API.to_string();
+        }
+        super::protocol_proxy::resolve_model_wire_api(
+            &self.wire_api,
+            self.model_wire_apis.as_ref(),
+            model,
+        )
+    }
+
+    /// Returns whether any model of this provider requires the loopback protocol gateway.
+    #[must_use]
+    pub fn needs_gateway(&self) -> bool {
+        if !self.gateway_enabled {
+            return false;
+        }
+        super::protocol_proxy::provider_needs_gateway(
+            self.gateway_enabled,
+            &self.wire_api,
+            self.model_wire_apis.as_ref(),
+        )
+    }
+
+}
+
 
 /// Result of connectivity probe and models fetching.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,21 +148,23 @@ pub struct CodexModelCatalog {
 }
 
 /// Generates a masked representation of an API key for safe display (e.g. "sk-****abcd").
+///
+/// Slices by chars, not bytes: API keys arrive from a free-form input field, and a
+/// byte-range slice would panic on any multi-byte character.
 #[must_use]
 pub fn mask_api_key(key: &str) -> String {
     let trimmed = key.trim();
     if trimmed.is_empty() {
         return String::new();
     }
-    if trimmed.len() <= 8 {
+    let chars: Vec<char> = trimmed.chars().collect();
+    let total = chars.len();
+    if total <= 8 {
         return "****".to_string();
     }
-    let prefix = if trimmed.starts_with("sk-") && trimmed.len() > 10 {
-        &trimmed[..5]
-    } else {
-        &trimmed[..3]
-    };
-    let suffix = &trimmed[trimmed.len() - 4..];
+    let prefix_len = if trimmed.starts_with("sk-") && total > 10 { 5 } else { 3 };
+    let prefix: String = chars[..prefix_len].iter().collect();
+    let suffix: String = chars[total - 4..].iter().collect();
     format!("{prefix}****{suffix}")
 }
 
@@ -138,10 +188,70 @@ pub fn provider_key_path(id: &str) -> PathBuf {
     provider_sandbox_dir(id).join("key")
 }
 
-/// Returns the path to the provider's model catalog (`~/.codexq/providers/<id>/models.json`).
+/// Returns the path to the provider's model catalog in the sandbox (`~/.codexq/providers/<id>/models.json`).
 #[must_use]
 pub fn provider_catalog_path(id: &str) -> PathBuf {
     provider_sandbox_dir(id).join("models.json")
+}
+
+/// Returns the host path to the model catalog for a provider (`~/.codex/model-catalogs/codexq-<id>.json`).
+#[must_use]
+pub fn provider_host_catalog_path(id: &str) -> PathBuf {
+    super::paths::codex_home().join("model-catalogs").join(format!("codexq-{id}.json"))
+}
+
+/// Returns the host model catalogs directory (`~/.codex/model-catalogs`).
+#[must_use]
+pub fn model_catalogs_dir() -> PathBuf {
+    super::paths::codex_home().join("model-catalogs")
+}
+
+/// Default baseline reasoning levels in Codex.
+pub const DEFAULT_REASONING_LEVELS: &[&str] = &["low", "medium", "high"];
+
+/// Canonical reasoning effort rank:
+/// none (0) < minimal (1) < low (2) < medium (3) < high (4) < xhigh (5) < max (6) < ultra (7) < persistent (8)
+#[must_use]
+pub fn reasoning_level_rank(effort: &str) -> usize {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "none" => 0,
+        "minimal" => 1,
+        "low" => 2,
+        "medium" => 3,
+        "high" => 4,
+        "xhigh" => 5,
+        "max" => 6,
+        "ultra" => 7,
+        "persistent" => 8,
+        _ => 99,
+    }
+}
+
+/// Sorts reasoning levels strictly in ascending order of reasoning depth.
+pub fn sort_reasoning_levels(levels: &mut [String]) {
+    levels.sort_by(|a, b| {
+        let rank_a = reasoning_level_rank(a);
+        let rank_b = reasoning_level_rank(b);
+        if rank_a != rank_b {
+            rank_a.cmp(&rank_b)
+        } else {
+            a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase())
+        }
+    });
+}
+
+/// Returns the standard description for a given reasoning effort tier.
+#[must_use]
+pub fn reasoning_level_description(effort: &str) -> &'static str {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "none" => "Disable reasoning/thinking",
+        "low" => "Fast responses with lighter reasoning",
+        "medium" => "Balances speed and reasoning depth for everyday tasks",
+        "high" => "Greater reasoning depth for complex problems",
+        "xhigh" => "Extra high reasoning depth for complex problems",
+        "max" => "Maximum reasoning depth for the hardest problems",
+        _ => "Custom reasoning depth tier",
+    }
 }
 
 /// Safely persists a provider's plaintext API key into its filesystem sandbox with restricted permissions.
@@ -224,12 +334,16 @@ pub fn delete_provider_files(id: &str) -> Result<(), String> {
 /// * `models` - Additional model slugs to include in the catalog pool.
 /// * `default_context_window` - Provider-level context window setting (minimum 256,000).
 /// * `model_context_windows` - Optional map of per-model context window overrides.
+/// * `default_reasoning_levels` - Optional provider-level reasoning effort tiers (defaults to low, medium, high).
+/// * `model_reasoning_levels` - Optional map of per-model reasoning effort tiers.
 #[must_use]
 pub fn build_model_catalog(
     active_model: &str,
     models: &[String],
     default_context_window: Option<u64>,
     model_context_windows: Option<&HashMap<String, u64>>,
+    default_reasoning_levels: Option<&[String]>,
+    model_reasoning_levels: Option<&HashMap<String, Vec<String>>>,
 ) -> CodexModelCatalog {
     let mut model_list: Vec<String> = Vec::new();
     let trimmed_active = active_model.trim();
@@ -246,25 +360,6 @@ pub fn build_model_catalog(
         model_list.push("default".to_string());
     }
 
-    let default_reasoning_levels = vec![
-        ModelCatalogReasoningLevel {
-            effort: "low".to_string(),
-            description: "Fast responses with lighter reasoning".to_string(),
-        },
-        ModelCatalogReasoningLevel {
-            effort: "medium".to_string(),
-            description: "Balances speed and reasoning depth for everyday tasks".to_string(),
-        },
-        ModelCatalogReasoningLevel {
-            effort: "high".to_string(),
-            description: "Greater reasoning depth for complex problems".to_string(),
-        },
-        ModelCatalogReasoningLevel {
-            effort: "xhigh".to_string(),
-            description: "Extra high reasoning depth for complex problems".to_string(),
-        },
-    ];
-
     let entries: Vec<CodexModelCatalogEntry> = model_list
         .iter()
         .enumerate()
@@ -275,12 +370,53 @@ pub fn build_model_catalog(
                 .unwrap_or(DEFAULT_MIN_CONTEXT_WINDOW);
             let context_window = configured_ctx.max(DEFAULT_MIN_CONTEXT_WINDOW);
 
+            let raw_levels: Vec<String> = model_reasoning_levels
+                .and_then(|map| map.get(slug).cloned())
+                .or_else(|| default_reasoning_levels.map(|v| v.to_vec()))
+                .unwrap_or_else(|| {
+                    DEFAULT_REASONING_LEVELS
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect()
+                });
+
+            let mut clean_levels: Vec<String> = Vec::new();
+            for l in raw_levels {
+                let trimmed = l.trim().to_ascii_lowercase();
+                if !trimmed.is_empty() && !clean_levels.contains(&trimmed) {
+                    clean_levels.push(trimmed);
+                }
+            }
+            if clean_levels.is_empty() {
+                clean_levels = DEFAULT_REASONING_LEVELS
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect();
+            }
+            sort_reasoning_levels(&mut clean_levels);
+
+            let supported_reasoning_levels: Vec<ModelCatalogReasoningLevel> = clean_levels
+                .iter()
+                .map(|effort| ModelCatalogReasoningLevel {
+                    effort: effort.clone(),
+                    description: reasoning_level_description(effort).to_string(),
+                })
+                .collect();
+
+            let default_reasoning_level = if clean_levels.iter().any(|l| l == "medium") {
+                "medium".to_string()
+            } else if let Some(first) = clean_levels.first() {
+                first.clone()
+            } else {
+                "medium".to_string()
+            };
+
             CodexModelCatalogEntry {
                 slug: slug.clone(),
                 display_name: slug.clone(),
                 description: slug.clone(),
-                default_reasoning_level: "medium".to_string(),
-                supported_reasoning_levels: default_reasoning_levels.clone(),
+                default_reasoning_level,
+                supported_reasoning_levels,
                 shell_type: "shell_command".to_string(),
                 visibility: "list".to_string(),
                 supported_in_api: true,
@@ -326,9 +462,8 @@ pub fn build_model_catalog(
 /// Writes `~/.codex/model-catalogs/codexq-<id>.json` and keeps a mirror copy in the
 /// provider's sandbox directory.
 ///
-/// Note that this artifact is intentionally NOT referenced from `config.toml` via a
-/// root-level `model_catalog_json` key, because Codex CLI >= 0.149.1 rejects that
-/// undeclared key and fails to load the configuration.
+/// The returned absolute path is suitable for the root-level `model_catalog_json`
+/// setting in `config.toml`.
 ///
 /// # Arguments
 ///
@@ -337,10 +472,12 @@ pub fn build_model_catalog(
 /// * `models` - List of model slugs to include in the catalog pool.
 /// * `default_context_window` - Provider-level context window setting (minimum 256,000).
 /// * `model_context_windows` - Optional map of per-model context window overrides.
+/// * `default_reasoning_levels` - Optional provider-level reasoning effort tiers (defaults to low, medium, high).
+/// * `model_reasoning_levels` - Optional map of per-model reasoning effort tiers.
 ///
 /// # Returns
 ///
-/// The forward-slash relative path `model-catalogs/codexq-<id>.json`.
+/// The absolute path to `model-catalogs/codexq-<id>.json`.
 ///
 /// # Errors
 ///
@@ -351,9 +488,17 @@ pub fn generate_model_catalog(
     models: &[String],
     default_context_window: Option<u64>,
     model_context_windows: Option<&HashMap<String, u64>>,
+    default_reasoning_levels: Option<&[String]>,
+    model_reasoning_levels: Option<&HashMap<String, Vec<String>>>,
 ) -> Result<String, String> {
-    let catalog =
-        build_model_catalog(active_model, models, default_context_window, model_context_windows);
+    let catalog = build_model_catalog(
+        active_model,
+        models,
+        default_context_window,
+        model_context_windows,
+        default_reasoning_levels,
+        model_reasoning_levels,
+    );
     let json_bytes = serde_json::to_vec_pretty(&catalog)
         .map_err(|e| format!("Failed to serialize model catalog: {e}"))?;
 
@@ -370,8 +515,10 @@ pub fn generate_model_catalog(
     let sandbox_file = provider_catalog_path(id);
     let _ = atomic_write(&sandbox_file, &json_bytes);
 
-    // Return forward-slash relative path for config.toml
-    Ok(format!("model-catalogs/codexq-{id}.json"))
+    target_file
+        .canonicalize()
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|e| format!("Failed to resolve model catalog path: {e}"))
 }
 
 /// Tests connectivity to an OpenAI-compatible endpoint and queries available models.
@@ -461,10 +608,16 @@ pub async fn test_provider_connectivity(base_url: &str, api_key: &str) -> Connec
                     .text()
                     .await
                     .unwrap_or_else(|_| "Unknown error".to_string());
-                let short_err = if err_text.len() > 180 {
-                    format!("{}...", &err_text[..180])
-                } else {
-                    err_text
+                let short_err = {
+                    // Char-boundary-safe truncation: upstream error pages are frequently
+                    // UTF-8 with multi-byte content, and a byte slice would panic.
+                    let chars: Vec<char> = err_text.chars().collect();
+                    if chars.len() > 180 {
+                        let clipped: String = chars[..180].iter().collect();
+                        format!("{clipped}...")
+                    } else {
+                        err_text
+                    }
                 };
 
                 ConnectivityResult {

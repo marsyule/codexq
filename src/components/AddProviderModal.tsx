@@ -16,8 +16,11 @@ import {
   AlertCircle,
   RotateCcw,
   Search,
+  FileCode,
+  Copy,
+  ExternalLink,
 } from 'lucide-react';
-import { type ProviderData, type ConnectivityResult, type ToastPayload, formatContextWindow } from '../types';
+import { type ProviderData, type ConnectivityResult, type ToastPayload, type GatewayStatus, formatContextWindow, sortReasoningLevels, normalizeWireApi } from '../types';
 
 interface AddProviderModalProps {
   isOpen: boolean;
@@ -71,6 +74,33 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
   const [customCwInput, setCustomCwInput] = useState('');
   const [modelContextWindows, setModelContextWindows] = useState<Record<string, number>>({});
 
+  // Per-model upstream protocol overrides ('' / absent = inherit the provider default).
+  const [modelWireApis, setModelWireApis] = useState<Record<string, string>>({});
+
+  // Provider-level master switch: when off, per-model protocol selectors are hidden.
+  const [localGatewayEnabled, setLocalGatewayEnabled] = useState(false);
+
+  // Loopback gateway address, so the config preview shows the address CodexQ actually
+  // writes rather than the raw upstream when Chat Completions translation is in play.
+  const [gatewayBaseUrl, setGatewayBaseUrl] = useState('');
+
+  // Live gateway port + availability. The port is a process-wide setting, so this editor only
+  // displays it: showing a configurable field here would imply a per-provider port that the
+  // single-listener architecture cannot honour.
+  const [gatewayInfo, setGatewayInfo] = useState<{
+    port: number;
+    state: string;
+    running: boolean;
+    envOverride: boolean;
+  } | null>(null);
+
+  // Reasoning Levels State (Default: low, medium, high)
+  const [reasoningLevels, setReasoningLevels] = useState<string[]>(['low', 'medium', 'high']);
+  const [modelReasoningLevels, setModelReasoningLevels] = useState<Record<string, string[]>>({});
+  const [customTierInput, setCustomTierInput] = useState('');
+  const [showAddTierInput, setShowAddTierInput] = useState(false);
+  const [catalogPath, setCatalogPath] = useState<string>('');
+
   // Model Pool State
   const [models, setModels] = useState<string[]>([]);
   const [activeModel, setActiveModel] = useState('');
@@ -117,9 +147,21 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
       const urlDisplay = baseUrl.trim() || 'https://api.example.com/v1';
       const nameDisplay = name.trim() || 'Custom Provider';
 
-      return `model = "${chosen}"\nmodel_provider = "${providerSlug}"\n\n[model_providers.${providerSlug}]\nname = "${nameDisplay}"\nbase_url = "${urlDisplay}"\nwire_api = "${pWireApi}"\nexperimental_bearer_token = "${keyDisplay}"\n`;
+      // The preview must show what CodexQ actually writes, not what the user selected.
+      // Codex always speaks Responses and rejects any other value, so a preview that
+      // echoed `wire_api = "chat"` would invite the user to brick their own Codex config
+      // by copying it into the custom-config field. Chat models are served by the
+      // loopback gateway, so the preview shows that address instead of the upstream.
+      const needsGateway =
+        normalizeWireApi(pWireApi) === 'chat' ||
+        Object.values(modelWireApis).some((value) => normalizeWireApi(value) === 'chat');
+      const effectiveBaseUrl = needsGateway
+        ? gatewayBaseUrl || 'http://127.0.0.1:17871/v1'
+        : urlDisplay;
+
+      return `model = "${chosen}"\nmodel_provider = "${providerSlug}"\n\n[model_providers.${providerSlug}]\nname = "${nameDisplay}"\nbase_url = "${effectiveBaseUrl}"\nwire_api = "responses"\nexperimental_bearer_token = "${keyDisplay}"\n`;
     },
-    [apiKey, baseUrl, editingProvider?.key_masked, name, providerSlug]
+    [apiKey, baseUrl, editingProvider?.key_masked, name, providerSlug, modelWireApis, gatewayBaseUrl]
   );
 
   // Context Window parsing helper (supports k, m suffixes, clamps to >= 256,000)
@@ -145,6 +187,7 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
       setBaseUrl(editingProvider.base_url);
       setApiKey(''); // Do not pull plaintext key to frontend
       setWireApi(editingProvider.wire_api || 'responses');
+      setLocalGatewayEnabled(editingProvider.gateway_enabled || false);
       setNotes(editingProvider.notes || '');
       setModels(editingProvider.models || []);
       const currentActive = editingProvider.active_model || editingProvider.models[0] || '';
@@ -156,6 +199,35 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
       setIsCustomCw(!isPreset);
       setCustomCwInput(!isPreset ? String(cw) : '');
       setModelContextWindows(editingProvider.model_context_windows || {});
+
+      const rLevels = editingProvider.reasoning_levels?.length
+        ? sortReasoningLevels(editingProvider.reasoning_levels)
+        : ['low', 'medium', 'high'];
+      setReasoningLevels(rLevels);
+
+      const sortedModelLevels: Record<string, string[]> = {};
+      if (editingProvider.model_reasoning_levels) {
+        for (const [m, lvls] of Object.entries(editingProvider.model_reasoning_levels)) {
+          if (lvls?.length) {
+            sortedModelLevels[m] = sortReasoningLevels(lvls);
+          }
+        }
+      }
+      setModelReasoningLevels(sortedModelLevels);
+
+      const normalizedModelWire: Record<string, string> = {};
+      if (editingProvider.model_wire_apis) {
+        for (const [m, api] of Object.entries(editingProvider.model_wire_apis)) {
+          if (m.trim()) {
+            normalizedModelWire[m] = normalizeWireApi(api);
+          }
+        }
+      }
+      setModelWireApis(normalizedModelWire);
+
+      invoke<string>('get_model_catalog_path', { providerId: editingProvider.id })
+        .then((p) => setCatalogPath(p))
+        .catch(() => setCatalogPath(''));
 
       if (editingProvider.custom_config_toml) {
         setCustomConfigToml(editingProvider.custom_config_toml);
@@ -177,6 +249,7 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
       setBaseUrl('');
       setApiKey('');
       setWireApi('responses');
+      setLocalGatewayEnabled(false);
       setNotes('');
       setModels([]);
       setActiveModel('');
@@ -184,6 +257,10 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
       setIsCustomCw(false);
       setCustomCwInput('');
       setModelContextWindows({});
+      setReasoningLevels(['low', 'medium', 'high']);
+      setModelReasoningLevels({});
+      setModelWireApis({});
+      setCatalogPath('');
       setCustomConfigToml('');
       setCustomAuthJson(DEFAULT_AUTH_JSON);
       setConfigTomlManuallyEdited(false);
@@ -205,6 +282,26 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
       setCustomConfigToml(generateDefaultConfigToml(activeModel, wireApi));
     }
   }, [configTomlManuallyEdited, generateDefaultConfigToml, activeModel, wireApi]);
+
+  // Resolve the gateway address and availability once per open, so the preview shows what
+  // CodexQ actually writes and the status line never claims a stopped listener is live.
+  useEffect(() => {
+    if (!isOpen) return;
+    invoke<GatewayStatus>('get_gateway_status')
+      .then((status) => {
+        setGatewayBaseUrl(status?.base_url ?? '');
+        setGatewayInfo({
+          port: status?.port ?? 0,
+          state: status?.port_state ?? 'free',
+          running: status?.running === true,
+          envOverride: status?.env_override === true,
+        });
+      })
+      .catch(() => {
+        setGatewayBaseUrl('');
+        setGatewayInfo(null);
+      });
+  }, [isOpen]);
 
   // Manual Model Adding
   const handleAddModel = (modelToAdd?: string) => {
@@ -373,15 +470,42 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
         }
       }
 
+      const cleanedModelReasoning: Record<string, string[]> = {};
+      for (const [m, r] of Object.entries(modelReasoningLevels)) {
+        if ((models.includes(m) || m === activeModel) && r && r.length > 0) {
+          cleanedModelReasoning[m] = sortReasoningLevels(r);
+        }
+      }
+
+      // Master off normalizes every model back to Responses and clears protocol
+      // overrides; no hidden stale Chat routing remains.
+      const defaultWire = localGatewayEnabled ? normalizeWireApi(wireApi) : 'responses';
+
+      const cleanedModelWireApis: Record<string, string> = {};
+      if (localGatewayEnabled) {
+        for (const [m, api] of Object.entries(modelWireApis)) {
+          const slug = m.trim();
+          if (!slug || !(models.includes(m) || m === activeModel)) continue;
+          const normalized = normalizeWireApi(api);
+          if (normalized !== defaultWire) {
+            cleanedModelWireApis[slug] = normalized;
+          }
+        }
+      }
+
       const payload = {
         id: editingProvider ? editingProvider.id : undefined,
         name: name.trim(),
         base_url: baseUrl.trim(),
-        wire_api: wireApi,
+        wire_api: localGatewayEnabled ? wireApi : 'responses',
+        gateway_enabled: localGatewayEnabled,
         active_model: activeModel.trim() || (models[0] ?? 'default'),
         models: models.length > 0 ? models : [activeModel.trim() || 'default'],
         context_window: effectiveCw,
         model_context_windows: Object.keys(cleanedModelCw).length > 0 ? cleanedModelCw : undefined,
+        reasoning_levels: reasoningLevels.length > 0 ? sortReasoningLevels(reasoningLevels) : undefined,
+        model_reasoning_levels: Object.keys(cleanedModelReasoning).length > 0 ? cleanedModelReasoning : undefined,
+        model_wire_apis: Object.keys(cleanedModelWireApis).length > 0 ? cleanedModelWireApis : undefined,
         notes: notes.trim() || null,
         custom_config_toml: configTomlManuallyEdited ? customConfigToml.trim() || null : null,
         custom_auth_json: authJsonManuallyEdited ? customAuthJson.trim() || null : null,
@@ -726,6 +850,182 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
             )}
           </div>
 
+          {/* Provider Default Reasoning Levels Section */}
+          <div className="rounded-xl border border-slate-200/90 bg-slate-50/50 p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <label className="block text-xs font-semibold text-slate-700">
+                  {t('providers.defaultReasoningLevelsLabel', '服务商默认推理档位')}
+                </label>
+                <span className="text-[10px] text-slate-400">
+                  ({t('providers.reasoningEffortHint', '基线档位包含 low、medium、high，可按需添加 max 等高阶档位')})
+                </span>
+              </div>
+              <span className="text-[11px] font-mono text-slate-500 font-medium">
+                {reasoningLevels.join(', ')}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {['low', 'medium', 'high', 'xhigh', 'max'].map((tier) => {
+                const isActive = reasoningLevels.includes(tier);
+                const isMax = tier === 'max';
+                return (
+                  <button
+                    key={tier}
+                    type="button"
+                    onClick={() => {
+                      if (isActive) {
+                        if (reasoningLevels.length > 1) {
+                          setReasoningLevels(sortReasoningLevels(reasoningLevels.filter((t) => t !== tier)));
+                        }
+                      } else {
+                        setReasoningLevels(sortReasoningLevels([...reasoningLevels, tier]));
+                      }
+                    }}
+                    className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-mono transition-all cursor-pointer ${
+                      isActive
+                        ? isMax
+                          ? 'bg-amber-500 text-white font-bold shadow-2xs'
+                          : 'bg-blue-600 text-white font-semibold shadow-2xs'
+                        : 'bg-white hover:bg-slate-100 text-slate-600 border border-slate-200 shadow-2xs'
+                    }`}
+                  >
+                    {isMax && <span>⚡</span>}
+                    <span>{tier}</span>
+                    {isActive ? (
+                      <Check className="w-3 h-3 ml-0.5 opacity-80" />
+                    ) : (
+                      <Plus className="w-3 h-3 ml-0.5 text-slate-400" />
+                    )}
+                  </button>
+                );
+              })}
+
+              {/* Custom tiers */}
+              {reasoningLevels
+                .filter((t) => !['low', 'medium', 'high', 'xhigh', 'max'].includes(t))
+                .map((tier) => (
+                  <button
+                    key={tier}
+                    type="button"
+                    onClick={() => setReasoningLevels(sortReasoningLevels(reasoningLevels.filter((t) => t !== tier)))}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-mono bg-indigo-600 text-white font-semibold shadow-2xs cursor-pointer"
+                    title={t('common.delete', 'Click to remove')}
+                  >
+                    <span>{tier}</span>
+                    <X className="w-3 h-3 ml-0.5 opacity-80" />
+                  </button>
+                ))}
+
+              {/* Add custom tier */}
+              {showAddTierInput ? (
+                <div className="flex items-center gap-1">
+                  <input
+                    type="text"
+                    value={customTierInput}
+                    onChange={(e) => setCustomTierInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        const tClean = customTierInput.trim().toLowerCase();
+                        if (tClean && !reasoningLevels.includes(tClean)) {
+                          setReasoningLevels(sortReasoningLevels([...reasoningLevels, tClean]));
+                        }
+                        setCustomTierInput('');
+                        setShowAddTierInput(false);
+                      } else if (e.key === 'Escape') {
+                        setShowAddTierInput(false);
+                      }
+                    }}
+                    placeholder="tier name"
+                    autoFocus
+                    className="w-24 rounded-lg border border-slate-200 bg-white px-2 py-0.5 text-xs font-mono text-slate-800 placeholder-slate-400 focus:border-blue-500 focus:outline-hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const tClean = customTierInput.trim().toLowerCase();
+                      if (tClean && !reasoningLevels.includes(tClean)) {
+                        setReasoningLevels(sortReasoningLevels([...reasoningLevels, tClean]));
+                      }
+                      setCustomTierInput('');
+                      setShowAddTierInput(false);
+                    }}
+                    className="px-2 py-0.5 rounded-lg bg-blue-600 text-white text-xs cursor-pointer"
+                  >
+                    <Check className="w-3 h-3" />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setShowAddTierInput(true)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-slate-500 hover:text-slate-800 bg-white hover:bg-slate-100 border border-dashed border-slate-300 shadow-2xs cursor-pointer"
+                >
+                  <Plus className="w-3 h-3 text-slate-400" />
+                  <span>{t('providers.addReasoningTier', '添加档位')}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Local Protocol Gateway Master Switch */}
+          <div className="rounded-xl border border-slate-200/90 bg-slate-50/50 p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setLocalGatewayEnabled(v => !v)}
+                  aria-pressed={localGatewayEnabled}
+                  className={`relative h-5 w-9 rounded-full transition-colors cursor-pointer ${localGatewayEnabled ? 'bg-blue-600' : 'bg-slate-300'}`}
+                >
+                  <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${localGatewayEnabled ? 'left-auto right-0.5' : 'left-0.5 right-auto'}`} />
+                </button>
+                <label className="text-xs font-semibold text-slate-700">
+                  {t('providers.localGatewayLabel', '本地协议网关')}
+                </label>
+              </div>
+              <span className="text-[10px] font-mono text-slate-500">
+                {localGatewayEnabled
+                  ? t('providers.localGatewayOn', '开启时可为模型选择 Responses / Chat；全 Responses 仍直连')
+                  : t('providers.localGatewayOff', '关闭：全部模型 Responses 直连')}
+              </span>
+            </div>
+
+            {/* Read-only global port + availability. The port belongs to the process-wide
+                listener, so it is displayed here (where the user reasons about model routing)
+                but edited only in Settings — an editable field here would imply a per-provider
+                port that a single listener cannot honour. */}
+            {gatewayInfo && (
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pt-1 border-t border-slate-200/70">
+                <span className="text-[10px] text-slate-400 font-medium">
+                  {t('providers.gatewayPortShort', '端口')}
+                </span>
+                <span className="text-[11px] font-mono text-slate-700">{gatewayInfo.port}</span>
+                <span
+                  className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${
+                    gatewayInfo.state === 'running'
+                      ? 'bg-blue-50 text-blue-700 border-blue-200/80'
+                      : gatewayInfo.state === 'occupied'
+                        ? 'bg-rose-50 text-rose-700 border-rose-200/80'
+                        : 'bg-emerald-50 text-emerald-700 border-emerald-200/80'
+                  }`}
+                >
+                  {gatewayInfo.state === 'running'
+                    ? t('settings.gateway.statusRunning', '运行中')
+                    : gatewayInfo.state === 'occupied'
+                      ? t('settings.gateway.statusOccupied', '被占用')
+                      : t('settings.gateway.statusFree', '可用')}
+                </span>
+                <span className="text-[10px] text-slate-400">
+                  {gatewayInfo.envOverride
+                    ? t('settings.gateway.envOverride', { port: gatewayInfo.port, defaultValue: '端口由环境变量决定' })
+                    : t('providers.gatewayPortGlobalHint', '全局设置 · 在「设置」中修改')}
+                </span>
+              </div>
+            )}
+          </div>
           {/* Active Model Pool Section */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
@@ -758,14 +1058,14 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
                   return (
                     <div
                       key={m}
-                      className={`flex items-center justify-between gap-2.5 px-3 py-2 rounded-xl border transition-all ${
+                      className={`flex flex-wrap items-center justify-between gap-x-2.5 gap-y-2 px-3 py-2 rounded-xl border transition-all ${
                         isCurrentActive
                           ? 'bg-blue-50/60 border-blue-300 ring-1 ring-blue-500/15 shadow-2xs'
                           : 'bg-white border-slate-200/90 hover:border-slate-300 shadow-2xs'
                       }`}
                     >
                       {/* Left: Radio/Button for default active + Model Name */}
-                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <div className="flex items-center gap-2 min-w-0 grow basis-[13rem]">
                         <button
                           type="button"
                           onClick={() => setActiveModel(m)}
@@ -791,7 +1091,7 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
                       </div>
 
                       {/* Right: Per-model Context Window Selector + Delete Button */}
-                      <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex flex-wrap items-center justify-end gap-1.5 shrink-0 ml-auto">
                         <span className="text-[10px] text-slate-400 font-medium">
                           {t('providers.contextWindowLabelShort', '上下文:')}
                         </span>
@@ -856,6 +1156,91 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
                           <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
                         </div>
 
+                        {/* Model-specific upstream protocol override.
+                            One upstream can expose both protocols at once, so this lets a
+                            Responses model stay native while a sibling model is translated
+                            from Chat Completions by the local gateway. */}
+                        {localGatewayEnabled && (() => {
+                          const explicit = modelWireApis[m];
+                          const isOverriddenProtocol = explicit !== undefined && explicit !== null;
+                          const providerDefault = normalizeWireApi(wireApi);
+                          const effectiveProtocol = isOverriddenProtocol
+                            ? normalizeWireApi(explicit)
+                            : providerDefault;
+                          const protocolLabel = (value: 'responses' | 'chat') =>
+                            value === 'chat'
+                              ? t('providers.wireApiChatShort', 'Chat')
+                              : t('providers.wireApiResponsesShort', 'Responses');
+                          return (
+                            <div className="relative shrink-0">
+                              <select
+                                value={isOverriddenProtocol ? effectiveProtocol : 'default'}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setModelWireApis((prev) => {
+                                    const next = { ...prev };
+                                    if (val === 'default') {
+                                      delete next[m];
+                                    } else {
+                                      next[m] = val;
+                                    }
+                                    return next;
+                                  });
+                                }}
+                                title={t(
+                                  'providers.modelWireApiTitle',
+                                  '该模型的上游协议。Responses 直连上游；Chat Completions 经本地协议网关转换。'
+                                )}
+                                className={`text-xs py-1 pl-2.5 pr-7 rounded-lg border appearance-none cursor-pointer transition-colors focus:outline-hidden ${
+                                  isOverriddenProtocol
+                                    ? 'bg-amber-50 text-amber-800 border-amber-300 font-semibold'
+                                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-300'
+                                }`}
+                              >
+                                <option value="default">
+                                  {t('providers.inheritDefault', '跟随默认')} ({protocolLabel(providerDefault)})
+                                </option>
+                                <option value="responses">{protocolLabel('responses')}</option>
+                                <option value="chat">{protocolLabel('chat')}</option>
+                              </select>
+                              <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                            </div>
+                          );
+                        })()}
+
+                        {/* Model-specific Max Reasoning toggle */}
+                        {(() => {
+                          const currentModelLevels = modelReasoningLevels[m] ?? reasoningLevels;
+                          const hasMax = currentModelLevels.includes('max');
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const nextLevels = hasMax
+                                  ? currentModelLevels.filter((lvl) => lvl !== 'max')
+                                  : sortReasoningLevels([...currentModelLevels, 'max']);
+                                setModelReasoningLevels((prev) => ({
+                                  ...prev,
+                                  [m]: sortReasoningLevels(nextLevels),
+                                }));
+                              }}
+                              className={`inline-flex items-center gap-0.5 px-2 py-1 rounded-lg text-xs font-mono transition-all cursor-pointer ${
+                                hasMax
+                                  ? 'bg-amber-500 text-white font-bold shadow-2xs'
+                                  : 'bg-slate-100 hover:bg-slate-200 text-slate-500'
+                              }`}
+                              title={
+                                hasMax
+                                  ? t('providers.modelReasoningBadgeTitle', '独立推理档位: {{levels}}', { levels: currentModelLevels.join(', ') })
+                                  : t('providers.maxReasoningBadge', '点击为该模型开启 Max 推理')
+                              }
+                            >
+                              <span>⚡</span>
+                              <span>Max</span>
+                            </button>
+                          );
+                        })()}
+
                         <button
                           type="button"
                           onClick={() => handleRemoveModel(m)}
@@ -917,22 +1302,8 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
 
             {showAdvanced && (
               <div className="p-3 pt-0 space-y-3.5 border-t border-slate-100">
-                {/* Wire API & Notes */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      {t('providers.wireApiLabel', 'Wire API Protocol')}
-                    </label>
-                    <select
-                      value={wireApi}
-                      onChange={(e) => setWireApi(e.target.value)}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 focus:border-blue-500 focus:outline-hidden transition-all"
-                    >
-                      <option value="responses">{t('providers.wireApiResponses', 'OpenAI Responses (Standard)')}</option>
-                      <option value="chat">{t('providers.wireApiChat', 'Chat Completions Compatible')}</option>
-                    </select>
-                  </div>
-
+                {/* Notes */}
+                <div className="grid grid-cols-1 gap-3 pt-2">
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
                       {t('providers.notesLabel', 'Notes / Description')}
@@ -956,7 +1327,7 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
                     <button
                       type="button"
                       onClick={() => {
-                        setCustomConfigToml(generateDefaultConfigToml(activeModel, wireApi));
+                        setCustomConfigToml(generateDefaultConfigToml(activeModel, localGatewayEnabled ? wireApi : 'responses'));
                         setConfigTomlManuallyEdited(false);
                       }}
                       className="inline-flex items-center gap-1 text-[11px] text-blue-600 hover:text-blue-800 transition-colors"
@@ -1012,6 +1383,54 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
                     placeholder={`{\n  "auth_mode": "api_key"\n}`}
                   />
                 </div>
+
+                {/* Model Catalog Path info */}
+                {catalogPath && (
+                  <div className="space-y-1.5 p-2.5 rounded-xl border border-slate-200/80 bg-white">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5 font-mono">
+                        <FileCode className="w-3.5 h-3.5 text-blue-600" />
+                        {t('providers.catalogPath', '模型目录文件路径')}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(catalogPath);
+                              showToast(t('providers.copiedCatalogPath', '已复制模型目录路径'), 'success');
+                            } catch {
+                              // fallback
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 transition-colors cursor-pointer"
+                          title={t('providers.copyCatalogPath', '复制路径')}
+                        >
+                          <Copy className="w-3 h-3" />
+                          <span>{t('providers.copyCatalogPath', '复制路径')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              await invoke('open_model_catalog', { providerId: editingProvider?.id || providerSlug });
+                            } catch (err: any) {
+                              showToast(String(err), 'error');
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium text-blue-700 hover:text-blue-900 bg-blue-50 hover:bg-blue-100 border border-blue-200/80 transition-colors cursor-pointer"
+                          title={t('providers.openCatalogFile', '打开模型配置 (JSON)')}
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                          <span>{t('providers.openCatalogFile', '打开模型配置')}</span>
+                        </button>
+                      </div>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-500 break-all select-all bg-slate-50 p-1.5 rounded-lg border border-slate-200/60">
+                      {catalogPath}
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </div>
