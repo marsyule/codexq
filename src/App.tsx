@@ -261,7 +261,10 @@ export function App() {
 
   // Switch active account (pure switch, no restart)
   const handleSwitchAccount = async (targetAccount: AccountData) => {
-    const targetKey = targetAccount.email || targetAccount.identity_key;
+    // Resolve by the unique identity key, never by email: a single email can map to
+    // several accounts (personal Plus + Team/Business), and an email-based lookup
+    // would always resolve to whichever row the database returns first.
+    const targetKey = targetAccount.identity_key;
     setSwitchingId(targetAccount.identity_key);
     setError(null);
     try {
@@ -312,7 +315,8 @@ export function App() {
     setRemoving(true);
     setError(null);
     try {
-      const target = removeTargetAccount.email || removeTargetAccount.identity_key;
+      // Resolve by identity key: email is not unique across personal / team plans.
+      const target = removeTargetAccount.identity_key;
       await invoke('remove_account', { target });
       await fetchAccounts();
       await fetchTrash();

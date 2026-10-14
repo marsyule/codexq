@@ -262,6 +262,26 @@ OpenAI 官方客户端采用 **Refresh Token Rotation (RTR)** 机制维护认证
   - `trigger_warmup(target, model, prompt, force, timeout)`: 立即触发单次预热问候请求。
   - `set_locale(locale: String)`: 动态重绘系统原生托盘菜单语言。
 
+#### 4.1.1 账号标识解析契约 (`resolve_account`)
+
+`switch_account` / `remove_account` / `set_alias` / `get_history` / `list_account_alarms` / `trigger_warmup` / `refresh_one` 均通过 `core::db::resolve_account` 将 `target` 字符串映射为唯一账号。
+
+**为什么不能只按邮箱定位**：同一个邮箱可能同时绑定个人 Plus 订阅与 Team/Business 工作区，形成多条 `accounts` 记录；同一个 `user_id` 也可能拥有多个 `account_id`。若解析器任意返回其中一条，切号、删号、改别名都会作用到错误账号上。
+
+**确定性优先级阶梯**（按顺序逐层匹配，命中即止，不依赖数据库返回顺序）：
+
+| 优先级 | 匹配条件 | 说明 |
+| --- | --- | --- |
+| 1 | `identity_key = target` | 主键，天然唯一，最可靠 |
+| 2 | `alias = target` | 用户自定义别名优先于邮箱，允许别名中包含 `@` |
+| 3 | `user_id = target` | 同一 `user_id` 多账号时判定为歧义 |
+| 4 | `email = target` | 同一邮箱多账号时判定为歧义 |
+| 5 | `profile_id = target` | `UNIQUE` 列，天然唯一 |
+| 6 | `profile_id LIKE target || '%'` | 前缀匹配，命中多条时判定为歧义 |
+| 7 | 邮箱用户名前缀（`bob` 匹配 `bob@example.com`） | 大小写不敏感兜底，命中多条时判定为歧义 |
+
+**歧义即报错**：任一层级命中多于一条记录时，`resolve_account` 返回 `Err`，错误信息说明冲突数量与所用层级，并提示改用 `identity_key`、`alias` 或 `profile_id`。前端所有调用点均以 `identity_key` 作为 `target`，因此正常交互永远不会触发歧义分支；该分支仅作为纵深防御，防止未来新增调用点回归到邮箱寻址。
+
 ### 4.2 Rust 核心与 Codex CLI 交互：`codex app-server`
 - Rust 通过 `tokio::process::Command` 启动后台子进程 `codex app-server --stdio`（Windows 平台启用 `CREATE_NO_WINDOW` 0 弹窗闪烁）。
 - 通过 stdio JSON-RPC 发送握手指令（`initialize` -> `initialized` -> `account/rateLimits/read`）并监听响应，提取限额窗口 (`window_minutes`)、已使用比率 (`used_percent`) 和重置时间 (`resets_at`)。

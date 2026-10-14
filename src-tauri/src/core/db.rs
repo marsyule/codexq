@@ -478,65 +478,106 @@ pub fn sync_profile_auth_metadata(identity_key: &str, profile_dir: &Path) -> Res
 }
 
 /// Resolves an account from identifier, email, alias, or profile ID prefix.
+///
+/// A single mailbox can legitimately map to more than one account row (for example
+/// the same person holding a personal Plus subscription and a separate
+/// Team/Business workspace), and one `user_id` can own several `account_id`s.
+/// Any target that matches more than one account is rejected instead of resolving
+/// to whichever row SQLite happens to return first: callers must pass a unique
+/// identifier such as `identity_key`, `alias`, or `profile_id`.
+///
+/// Matching walks a fixed priority ladder and stops at the first tier that
+/// matches, so the outcome never depends on row order:
+///
+/// 1. `identity_key` (primary key, always unique)
+/// 2. `alias`
+/// 3. `user_id`
+/// 4. `email`
+/// 5. `profile_id` (unique column)
+/// 6. `profile_id` prefix
+/// 7. email username prefix (`"bob"` matches `bob@example.com`)
 pub fn resolve_account(target: &str) -> Result<Option<Identity>, String> {
+    let conn = get_connection()?;
+    resolve_account_with(&conn, target)
+}
+
+/// Columns selected by every account lookup, in `Identity` field order.
+const ACCOUNT_SELECT: &str = "SELECT user_id, account_id, email, plan, org_title FROM accounts";
+
+/// Identifier tiers tried by [`resolve_account_with`], most specific first.
+///
+/// The label is only used to build the ambiguity error message.
+const MATCH_TIERS: [(&str, &str); 6] = [
+    ("identity key", "identity_key = ?1"),
+    ("alias", "alias = ?1"),
+    ("user id", "user_id = ?1"),
+    ("email", "email = ?1"),
+    ("profile id", "profile_id = ?1"),
+    ("profile id prefix", "profile_id LIKE ?1 || '%'"),
+];
+
+/// Maps a row of [`ACCOUNT_SELECT`] columns to an [`Identity`].
+fn identity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Identity> {
+    Ok(Identity {
+        user_id: row.get(0)?,
+        account_id: row.get(1)?,
+        email: row.get(2)?,
+        plan: row.get(3)?,
+        org_title: row.get(4)?,
+    })
+}
+
+/// Resolves an account against an explicit connection.
+///
+/// Split out from [`resolve_account`] so the ambiguity rules can be exercised
+/// against an in-memory database instead of the host profile store.
+///
+/// # Errors
+///
+/// Returns `Err` when a query fails or when `target` matches more than one
+/// account within a single tier, which makes it an ambiguous identifier.
+pub(crate) fn resolve_account_with(
+    conn: &Connection,
+    target: &str,
+) -> Result<Option<Identity>, String> {
     let target = target.trim();
     if target.is_empty() {
         return Ok(None);
     }
-    let conn = get_connection()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT user_id, account_id, email, plan, org_title FROM accounts
-             WHERE identity_key = ?1
-                OR alias = ?1
-                OR email = ?1
-                OR user_id = ?1
-                OR profile_id = ?1
-                OR profile_id LIKE ?1 || '%'
-             ORDER BY CASE
-                 WHEN identity_key = ?1 THEN 0
-                 WHEN alias = ?1 THEN 1
-                 WHEN email = ?1 THEN 2
-                 WHEN profile_id = ?1 THEN 3
-                 ELSE 4
-             END
-             LIMIT 1",
-        )
-        .map_err(|e| e.to_string())?;
 
-    let found = stmt
-        .query_row(params![target], |row| {
-            Ok(Identity {
-                user_id: row.get(0)?,
-                account_id: row.get(1)?,
-                email: row.get(2)?,
-                plan: row.get(3)?,
-                org_title: row.get(4)?,
-            })
-        })
-        .optional()
-        .map_err(|e| e.to_string())?;
+    for (label, predicate) in MATCH_TIERS {
+        let sql = format!("{ACCOUNT_SELECT} WHERE {predicate}");
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let matches: Vec<Identity> = stmt
+            .query_map(params![target], identity_from_row)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .collect();
 
-    if found.is_some() {
-        return Ok(found);
+        match matches.len() {
+            // This tier cannot name the account; try a less specific one.
+            0 => continue,
+            // Exactly one row: the identifier is unambiguous.
+            1 => return Ok(matches.into_iter().next()),
+            // Several rows: refuse to guess, the caller must be more specific.
+            _ => {
+                return Err(format!(
+                    "Account '{target}' is ambiguous: {} accounts share the same {label}. \
+                     Pass the exact identity key, alias, or profile id instead.",
+                    matches.len()
+                ));
+            }
+        }
     }
 
     // Fallback: match by email username prefix
     let target_lower = target.to_lowercase();
     let mut stmt_all = conn
-        .prepare("SELECT user_id, account_id, email, plan, org_title FROM accounts")
+        .prepare(ACCOUNT_SELECT)
         .map_err(|e| e.to_string())?;
 
     let all: Vec<Identity> = stmt_all
-        .query_map([], |row| {
-            Ok(Identity {
-                user_id: row.get(0)?,
-                account_id: row.get(1)?,
-                email: row.get(2)?,
-                plan: row.get(3)?,
-                org_title: row.get(4)?,
-            })
-        })
+        .query_map([], identity_from_row)
         .map_err(|e| e.to_string())?
         .flatten()
         .filter(|id| {
@@ -550,6 +591,14 @@ pub fn resolve_account(target: &str) -> Result<Option<Identity>, String> {
 
     if all.len() == 1 {
         return Ok(Some(all.into_iter().next().unwrap()));
+    }
+
+    if all.len() > 1 {
+        return Err(format!(
+            "Account '{target}' is ambiguous: {} accounts share the same email username. \
+             Pass the exact identity key, alias, or profile id instead.",
+            all.len()
+        ));
     }
 
     Ok(None)

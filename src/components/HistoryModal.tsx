@@ -26,8 +26,8 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
     setLoading(true);
     setError(null);
     try {
-      // Pass the display_name, email, or identity_key
-      const target = account.email || account.identity_key;
+      // Resolve by identity key: email is not unique across personal / team plans.
+      const target = account.identity_key;
       const res = await invoke<SnapshotRecord[]>('get_history', {
         target,
         limit: 50,
