@@ -131,7 +131,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
       showToast(enabled ? { key: 'toasts.autoRolloverEnabled' } : { key: 'toasts.autoRolloverDisabled' });
     } catch (err) {
       console.error('Failed to update account rollover', err);
-      showToast(`保存失败: ${err}`, 'error');
+      showToast(`${t('scheduler.saveFailed')}: ${err}`, 'error');
     } finally {
       setSavingRollover(false);
     }
@@ -151,7 +151,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
       showToast({ key: 'toasts.autoRolloverSaved' }, 'success');
     } catch (err) {
       console.error('Failed to update account rollover threshold', err);
-      showToast(`保存失败: ${err}`, 'error');
+      showToast(`${t('scheduler.saveFailed')}: ${err}`, 'error');
     } finally {
       setSavingRollover(false);
     }
@@ -218,7 +218,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
   const overallOverlapStatus = useMemo(() => {
     const activeAlarms = alarms.filter((a) => (typeof a.enabled === 'boolean' ? a.enabled : a.enabled === 1));
     if (activeAlarms.length <= 1) {
-      return { hasConflict: false, message: '闹钟配置良好，无时间冲突' };
+      return { hasConflict: false, message: t('scheduler.scheduleOk') };
     }
     for (let i = 0; i < activeAlarms.length; i++) {
       for (let j = i + 1; j < activeAlarms.length; j++) {
@@ -227,12 +227,16 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
         if (diff < 5 * 60) {
           return {
             hasConflict: true,
-            message: `防重叠冲突：闹钟 ${activeAlarms[i].time_of_day} 与 ${activeAlarms[j].time_of_day} 间隔仅 ${(diff / 60).toFixed(1)} 小时（需 ≥ 5 小时）`,
+            message: t('scheduler.scheduleConflict', {
+              a: activeAlarms[i].time_of_day,
+              b: activeAlarms[j].time_of_day,
+              hours: (diff / 60).toFixed(1),
+            }),
           };
         }
       }
     }
-    return { hasConflict: false, message: '闹钟配置良好，无时间冲突' };
+      return { hasConflict: false, message: t('scheduler.scheduleOk') };
   }, [alarms]);
 
   // Toggle alarm enabled
@@ -258,7 +262,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
       await fetchAlarms();
       showToast({ key: 'toasts.alarmSaved' }, 'success');
     } catch (err: any) {
-      showToast(`更新失败: ${err}`, 'error');
+      showToast(`${t('scheduler.updateFailed')}: ${err}`, 'error');
     }
   };
 
@@ -269,7 +273,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
       await fetchAlarms();
       showToast({ key: 'toasts.alarmDeleted' }, 'success');
     } catch (err: any) {
-      showToast(`删除失败: ${err}`, 'error');
+      showToast(`${t('scheduler.deleteFailed')}: ${err}`, 'error');
     }
   };
 
@@ -299,7 +303,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
       await fetchAlarms();
       showToast({ key: 'toasts.alarmSaved' }, 'success');
     } catch (err: any) {
-      setAlarmFormError(typeof err === 'string' ? err : err?.message || '保存失败');
+      setAlarmFormError(typeof err === 'string' ? err : err?.message || t('scheduler.saveFailed'));
     }
   };
 
@@ -512,7 +516,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
             >
               {rolloverEnabled ? `● ${t('scheduler.autoRolloverActive')}` : `○ ${t('scheduler.autoRolloverInactive')}`}
             </span>
-            <span className="text-[11px] text-slate-400 font-mono">窗口: 300m (5h)</span>
+            <span className="text-[11px] text-slate-400 font-mono">{t('scheduler.windowLabel')}</span>
           </div>
         </div>
 

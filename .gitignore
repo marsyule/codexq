@@ -162,3 +162,9 @@ logs/
 *.pid
 *.seed
 *.tmp
+
+# ------------------------------------------------------------------------------
+# 9. Agent Workspace Notes
+# ------------------------------------------------------------------------------
+# Local agent scratch notes and memory; not part of the project.
+.workbuddy/

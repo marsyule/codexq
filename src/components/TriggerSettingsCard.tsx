@@ -50,7 +50,7 @@ export const TriggerSettingsCard: React.FC<TriggerSettingsCardProps> = ({ showTo
       await invoke('set_app_setting', { key, value });
     } catch (err) {
       console.error('Failed to update setting', err);
-      showToast(`保存失败: ${err}`, 'error');
+      showToast(`${t('scheduler.saveFailed')}: ${err}`, 'error');
     } finally {
       setSaving(false);
     }
