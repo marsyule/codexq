@@ -35,7 +35,8 @@ export const AliasModal: React.FC<AliasModalProps> = ({
     setLoading(true);
     setError(null);
     try {
-      const target = account.email || account.identity_key;
+      // Resolve by identity key: email is not unique across personal / team plans.
+      const target = account.identity_key;
       const cleanAlias = alias.trim();
       await invoke('set_alias', {
         target,
@@ -54,7 +55,8 @@ export const AliasModal: React.FC<AliasModalProps> = ({
     setLoading(true);
     setError(null);
     try {
-      const target = account.email || account.identity_key;
+      // Resolve by identity key: email is not unique across personal / team plans.
+      const target = account.identity_key;
       await invoke('set_alias', {
         target,
         alias: null,

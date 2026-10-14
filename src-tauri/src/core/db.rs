@@ -478,12 +478,31 @@ pub fn sync_profile_auth_metadata(identity_key: &str, profile_dir: &Path) -> Res
 }
 
 /// Resolves an account from identifier, email, alias, or profile ID prefix.
+///
+/// A single email address can legitimately map to more than one account row (for
+/// example the same person holding a personal Plus subscription and a separate
+/// Team/Business workspace). Such an email is therefore an ambiguous target: the
+/// caller must pass `identity_key`, `alias`, or `user_id` instead. Returning an
+/// arbitrary row would silently switch the user to the wrong account.
 pub fn resolve_account(target: &str) -> Result<Option<Identity>, String> {
+    let conn = get_connection()?;
+    resolve_account_with(&conn, target)
+}
+
+/// Resolves an account against an explicit connection.
+///
+/// Split out from [`resolve_account`] so the ambiguity rules can be exercised
+/// against an in-memory database instead of the host profile store.
+///
+/// # Errors
+///
+/// Returns `Err` when the prepared statements fail or when `target` names an email
+/// that is shared by more than one account.
+pub(crate) fn resolve_account_with(conn: &Connection, target: &str) -> Result<Option<Identity>, String> {
     let target = target.trim();
     if target.is_empty() {
         return Ok(None);
     }
-    let conn = get_connection()?;
     let mut stmt = conn
         .prepare(
             "SELECT user_id, account_id, email, plan, org_title FROM accounts
@@ -517,8 +536,30 @@ pub fn resolve_account(target: &str) -> Result<Option<Identity>, String> {
         .optional()
         .map_err(|e| e.to_string())?;
 
-    if found.is_some() {
-        return Ok(found);
+    if let Some(ident) = found {
+        // Reject ambiguous email targets. One mailbox can hold several accounts
+        // (personal Plus + Team/Business), so an email-only lookup cannot name a
+        // single destination; switching to an arbitrary row would be wrong.
+        // Only an email-shaped target is ambiguous: an exact identity_key, alias,
+        // user_id or profile_id match already names one specific row.
+        if target.contains('@') {
+            if let Some(email) = ident.email.as_deref() {
+                let same_email: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM accounts WHERE email = ?1",
+                        params![email],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(1);
+                if same_email > 1 {
+                    return Err(format!(
+                        "Account '{target}' is ambiguous: {same_email} accounts share the email '{email}'. \
+                         Switch by identity key, alias, or user id instead."
+                    ));
+                }
+            }
+        }
+        return Ok(Some(ident));
     }
 
     // Fallback: match by email username prefix

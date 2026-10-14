@@ -374,6 +374,90 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    /// Builds an in-memory accounts table for resolver tests.
+    fn resolver_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE accounts (
+                 identity_key TEXT PRIMARY KEY,
+                 profile_id TEXT NOT NULL UNIQUE,
+                 user_id TEXT NOT NULL,
+                 account_id TEXT NOT NULL,
+                 email TEXT,
+                 plan TEXT,
+                 alias TEXT,
+                 org_title TEXT,
+                 first_seen_at TEXT NOT NULL,
+                 last_seen_at TEXT NOT NULL,
+                 last_credential_update TEXT NOT NULL,
+                 credential_sha256 TEXT NOT NULL,
+                 credential_path TEXT NOT NULL,
+                 credential_status TEXT NOT NULL DEFAULT 'active',
+                 reset_credits INTEGER DEFAULT 0,
+                 last_error TEXT,
+                 UNIQUE(user_id, account_id)
+             );"
+        )
+        .unwrap();
+        conn
+    }
+
+    /// Inserts one account row and returns its identity key.
+    fn seed_account(
+        conn: &rusqlite::Connection,
+        user_id: &str,
+        account_id: &str,
+        email: &str,
+        plan: &str,
+    ) -> String {
+        let key = format!("{user_id}\x1f{account_id}");
+        conn.execute(
+            "INSERT INTO accounts (
+                 identity_key, profile_id, user_id, account_id, email, plan,
+                 first_seen_at, last_seen_at, last_credential_update,
+                 credential_sha256, credential_path
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'now', 'now', 'now', 'sha', '/path')",
+            rusqlite::params![key, account_id, user_id, account_id, email, plan],
+        )
+        .unwrap();
+        key
+    }
+
+    #[test]
+    fn test_resolve_account_prefers_identity_key_over_shared_email() {
+        let conn = resolver_db();
+        let plus = seed_account(&conn, "user-1", "acct-plus", "same@example.com", "plus");
+        let team = seed_account(&conn, "user-1", "acct-team", "same@example.com", "team");
+
+        // The identity key must always name exactly one account, even when the
+        // mailbox is shared by several accounts.
+        let resolved = resolve_account_with(&conn, &plus).unwrap();
+        assert_eq!(resolved.map(|i| i.account_id), Some("acct-plus".to_string()));
+
+        let resolved = resolve_account_with(&conn, &team).unwrap();
+        assert_eq!(resolved.map(|i| i.account_id), Some("acct-team".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_account_rejects_ambiguous_email() {
+        let conn = resolver_db();
+        seed_account(&conn, "user-1", "acct-plus", "same@example.com", "plus");
+        seed_account(&conn, "user-1", "acct-team", "same@example.com", "team");
+
+        // An email shared by two accounts cannot identify a single destination,
+        // so the resolver must fail loudly instead of picking an arbitrary row.
+        let err = resolve_account_with(&conn, "same@example.com")
+            .expect_err("shared email must not resolve silently");
+        assert!(err.contains("ambiguous"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_resolve_account_unique_email_still_resolves() {
+        let conn = resolver_db();
+        seed_account(&conn, "user-1", "acct-only", "solo@example.com", "plus");
+
+        let resolved = resolve_account_with(&conn, "solo@example.com").unwrap();
+        assert_eq!(resolved.map(|i| i.account_id), Some("acct-only".to_string()));
+    }
 }
-
-
