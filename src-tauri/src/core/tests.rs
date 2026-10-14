@@ -424,6 +424,28 @@ mod tests {
         key
     }
 
+    /// Inserts one account row carrying an optional alias and returns its identity key.
+    fn seed_account_with_alias(
+        conn: &rusqlite::Connection,
+        user_id: &str,
+        account_id: &str,
+        email: &str,
+        plan: &str,
+        alias: Option<&str>,
+    ) -> String {
+        let key = format!("{user_id}\x1f{account_id}");
+        conn.execute(
+            "INSERT INTO accounts (
+                 identity_key, profile_id, user_id, account_id, email, plan, alias,
+                 first_seen_at, last_seen_at, last_credential_update,
+                 credential_sha256, credential_path
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'now', 'now', 'now', 'sha', '/path')",
+            rusqlite::params![key, account_id, user_id, account_id, email, plan, alias],
+        )
+        .unwrap();
+        key
+    }
+
     #[test]
     fn test_resolve_account_prefers_identity_key_over_shared_email() {
         let conn = resolver_db();
@@ -459,5 +481,102 @@ mod tests {
 
         let resolved = resolve_account_with(&conn, "solo@example.com").unwrap();
         assert_eq!(resolved.map(|i| i.account_id), Some("acct-only".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_account_rejects_ambiguous_user_id() {
+        let conn = resolver_db();
+        seed_account(&conn, "user-1", "acct-plus", "plus@example.com", "plus");
+        seed_account(&conn, "user-1", "acct-team", "team@example.com", "team");
+
+        // One user_id owning two accounts (personal Plus + Team workspace) cannot
+        // name a single destination, so it must fail loudly rather than pick a row.
+        let err = resolve_account_with(&conn, "user-1")
+            .expect_err("shared user id must not resolve silently");
+        assert!(err.contains("ambiguous"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_resolve_account_rejects_ambiguous_profile_id_prefix() {
+        let conn = resolver_db();
+        seed_account(&conn, "user-1", "acct-one", "one@example.com", "plus");
+        seed_account(&conn, "user-2", "acct-two", "two@example.com", "team");
+
+        // A prefix that matches two profile ids is ambiguous even though neither
+        // account is otherwise shared.
+        let err = resolve_account_with(&conn, "acct")
+            .expect_err("shared profile id prefix must not resolve silently");
+        assert!(err.contains("ambiguous"), "unexpected error: {err}");
+
+        // The full, exact profile id is still unambiguous.
+        let resolved = resolve_account_with(&conn, "acct-one").unwrap();
+        assert_eq!(resolved.map(|i| i.account_id), Some("acct-one".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_account_alias_wins_over_conflicting_email() {
+        let conn = resolver_db();
+        // The alias of one account equals the email of a different account.
+        seed_account_with_alias(
+            &conn,
+            "user-1",
+            "acct-aliased",
+            "owner@example.com",
+            "plus",
+            Some("owner@other.com"),
+        );
+        seed_account(&conn, "user-2", "acct-other", "owner@other.com", "team");
+
+        // The alias tier is checked before the email tier, so the aliased account
+        // must win instead of the row that owns the address.
+        let resolved = resolve_account_with(&conn, "owner@other.com").unwrap();
+        assert_eq!(resolved.map(|i| i.account_id), Some("acct-aliased".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_account_alias_containing_at_resolves() {
+        let conn = resolver_db();
+        seed_account_with_alias(
+            &conn,
+            "user-1",
+            "acct-work",
+            "personal@example.com",
+            "plus",
+            Some("work@corp.com"),
+        );
+        seed_account(&conn, "user-1", "acct-team", "personal@example.com", "team");
+
+        // An alias containing "@" is a legitimate unique alias, not an email-shaped
+        // target: the alias tier must resolve it before the email tier runs.
+        let resolved = resolve_account_with(&conn, "work@corp.com").unwrap();
+        assert_eq!(resolved.map(|i| i.account_id), Some("acct-work".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_account_rejects_ambiguous_email_username() {
+        let conn = resolver_db();
+        seed_account(&conn, "user-1", "acct-plus", "bob@plus.com", "plus");
+        seed_account(&conn, "user-2", "acct-team", "bob@team.com", "team");
+
+        // Two different mailboxes share the same username part, so the prefix
+        // fallback cannot pick one either.
+        let err = resolve_account_with(&conn, "bob")
+            .expect_err("shared email username must not resolve silently");
+        assert!(err.contains("ambiguous"), "unexpected error: {err}");
+
+        // A full, unique email still resolves.
+        let resolved = resolve_account_with(&conn, "bob@plus.com").unwrap();
+        assert_eq!(resolved.map(|i| i.account_id), Some("acct-plus".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_account_unknown_target_returns_none() {
+        let conn = resolver_db();
+        seed_account(&conn, "user-1", "acct-only", "solo@example.com", "plus");
+
+        // An identifier that matches nothing is simply absent, not an error.
+        assert!(resolve_account_with(&conn, "nobody").unwrap().is_none());
+        assert!(resolve_account_with(&conn, "  ").unwrap().is_none());
+        assert!(resolve_account_with(&conn, "").unwrap().is_none());
     }
 }

@@ -237,7 +237,10 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
       }
     }
       return { hasConflict: false, message: t('scheduler.scheduleOk') };
-  }, [alarms]);
+    // `t` is a dependency: react-i18next rebuilds it on a language change, and without
+    // it the memoized message would keep the previous language until the alarm list itself
+    // changed.
+  }, [alarms, t]);
 
   // Toggle alarm enabled
   const handleToggleAlarm = async (alarm: AccountAlarm) => {

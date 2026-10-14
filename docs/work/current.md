@@ -224,6 +224,19 @@
   - [x] 修复 Portable 首次冷启动识别：增强 `is_portable()` 检测可执行文件名包含 `portable`（不区分大小写），并在便携 ZIP 归档中内置打包 `portable` 标记文件，确保首次运行即可精准定位 `./data` 与 `.portable` 单实例作用域
   - [x] 机械验证：`cargo check`、`cargo test` (12/12) 与 `pnpm run build` 全部通过
 
+### 任务 19：PR #4 代码审查与账号解析 / 国际化缺陷修复 (PR #4 Review & Fixes)
+- **目标**：审查并修复 PR #4（`dev → main`）中「按 identity_key 解析账号」与「调度器硬编码文案国际化」两处改动引入的潜在缺陷；仅处理 Rust Core 与 React 前端，不触碰 Python CLI。
+- **状态**：已完成
+- **检查清单**：
+  - [x] **P1 账号解析歧义修复**：`resolve_account_with` 由「单条 SQL + `ORDER BY` + `LIMIT 1`」改为按固定优先级阶梯（`identity_key` → `alias` → `user_id` → `email` → `profile_id` → `profile_id` 前缀 → 邮箱用户名前缀）逐层匹配，命中即止，任一层级命中多条即返回 `Err`，结果不再依赖数据库返回顺序。
+  - [x] **修复 `contains('@')` 误判**：原逻辑会把包含 `@` 的合法别名当成邮箱做歧义判定；新逻辑按层级判定，别名中的 `@` 不再触发误报。
+  - [x] **前端寻址统一**：确认 `App.tsx`（切号 / 删除）、`AliasModal`、`HistoryModal` 均已改传 `identity_key`，`SchedulerView` 的 `list_account_alarms` / `trigger_warmup` 亦传 `identity_key`。
+  - [x] **P2 国际化缓存失效修复**：`SchedulerView.tsx` 的 `overallOverlapStatus` 依赖数组由 `[alarms]` 改为 `[alarms, t]`，确保切换语言后状态提示立即重算（已通过 `i18next.getFixedT` 验证不同语言返回不同函数标识）。
+  - [x] **同类缺陷排查**：全仓检索确认 `useMemo` 仅在 `SchedulerView` 中使用，其余 `useMemo`（`selectedAccount`、`secondaryRemaining`）不涉及 `t()`，无同类问题。
+  - [x] **回归测试**：新增 6 项 Rust 单元测试（歧义 user_id / 歧义 profile_id 前缀 / 别名优先于冲突邮箱 / 别名含 `@` / 歧义邮箱用户名 / 未命中返回 `None`）。
+  - [x] **机械验证**：`cargo test` (21/21)、`cargo check`、`cargo clippy`（改动文件零告警）、`pnpm run lint`、`tsc -b`、`pnpm run build` 全部通过。
+  - [x] 同步更新 `docs/architecture.md` 第 4.1.1 节「账号标识解析契约」。
+
 ## 3. 已知技术债与待优化项 (Tech Debt)
 
 1. **单文件维护性**：`codexq.py` 目前约 3500 行代码，保持单文件标准库免安装即用的同时，通过详尽的 29+ 项单元测试套件保证稳定性。
