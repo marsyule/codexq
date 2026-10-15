@@ -1290,7 +1290,7 @@ export function App() {
                   {t('settings.about.desc')}
                 </p>
                 <div className="pt-2 text-[11px] text-slate-400 flex items-center gap-4 font-mono">
-                  <span>{t('settings.about.version')}: v1.0.2</span>
+                  <span>{t('settings.about.version')}: v1.0.3</span>
                   <span>UI: Clash Verge Light</span>
                 </div>
               </div>

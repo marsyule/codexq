@@ -1,6 +1,6 @@
 [package]
 name = "codexq"
-version = "1.0.2"
+version = "1.0.3"
 description = "CodexQ - Multi-Account Quota Manager & Switcher"
 authors = ["CodexQ Team"]
 license = "MIT"
